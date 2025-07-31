@@ -6,7 +6,7 @@ Data Structures
 
 - [x] Bloom Filter
 - [ ] Scalable Bloom Filter
-- [ ] Counting Bloom Filter
+- [x] Counting Bloom Filter
 - [ ] Quotient filter
 - [ ] Cuckoo Filter
 - [ ] HyperLogLog
@@ -55,18 +55,55 @@ pub fn main() !void {
     try bloom.set("apple");
     try bloom.set("banana");
 
-    const has_apple = try bloom.has("apple"); // true
-    const has_banana = try bloom.has("banana"); // true
-    const has_grape = try bloom.has("grape"); // false
-
-    std.debug.print("Has apple: {}\n", .{has_apple});
-    std.debug.print("Has banana: {}\n", .{has_banana});
-    std.debug.print("Has grape: {}\n", .{has_grape});
+    _ = try bloom.has("apple"); // true
+    _ = try bloom.has("banana"); // true
+    _ = try bloom.has("grape"); // false
 
     const estimated_size = bloom.estimatedSize();
     std.debug.print("Estimated items in filter: {}\n", .{estimated_size});
 }
 ```
+
+### Counting Bloom Filter
+
+```zig
+const std = @import("std");
+const CountingBloomFilter = @import("probz").CountingBloomFilter;
+
+// Default counting bloom filter with u4 counters, up to 16 items
+const DefaultCountingBloomFilter = @import("probz").DefaultCountingBloomFilter;
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Create with custom counter size (u8 allows up to 255 occurrences)
+    var cbf = try CountingBloomFilter(u8).init(allocator, 100, 0.01);
+    defer cbf.deinit();
+
+    try cbf.add("apple");
+    try cbf.add("apple");
+    try cbf.add("banana");
+
+    _ = cbf.has("apple"); // true
+    _ = cbf.has("banana"); // true
+    _ = cbf.has("grape"); // false
+
+    // Fast removal - caller ensures item exists
+    cbf.remove("apple");
+    const still_has_apple = cbf.has("apple"); // true
+
+    cbf.remove("apple");
+    const no_apple = cbf.has("apple"); // false
+
+    try cbf.removeSafe("banana");
+    try cbf.removeSafe("banana");
+}
+```
+
+**Important**: `remove()` is fast but requires the caller to ensure the item exists via `has()`. For automatic safety checking, use `removeSafe()` instead.
+
 
 ## Contributing
 
