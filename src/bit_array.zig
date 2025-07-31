@@ -49,6 +49,13 @@ pub const BitArray = struct {
         self.cells[cellIdx(idx)] |= (@as(CELL_TYPE, 1) << offset);
     }
 
+    /// Check if bit is set (non-zero).
+    pub fn isSet(self: *const BitArray, idx: u64) BitArrayError!bool {
+        try self.checkIndex(idx);
+        const offset = bitOffset(idx);
+        return (self.cells[cellIdx(idx)] & (@as(CELL_TYPE, 1) << offset)) != 0;
+    }
+
     /// Clear value of bit to 0.
     pub fn unset(self: *BitArray, idx: u64) BitArrayError!void {
         try self.checkIndex(idx);
@@ -137,6 +144,15 @@ test "toggle" {
 
     try bits.toggle(400);
     try testing.expectEqual(1, try bits.get(400));
+}
+
+test "isSet" {
+    var bits = try BitArray.init(testing.allocator, 100);
+    defer bits.deinit();
+
+    try testing.expectEqual(false, try bits.isSet(50));
+    try bits.set(50);
+    try testing.expect(try bits.isSet(50));
 }
 
 test "count bit set" {

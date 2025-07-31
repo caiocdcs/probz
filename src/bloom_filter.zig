@@ -62,8 +62,8 @@ pub const BloomFilter = struct {
 
         for (0..self.k) |i| {
             const b = self.calculateBit(&hashes, @truncate(i));
-            const bit_value = self.bit_array.get(b) catch @as(u1, 0);
-            if (bit_value == 0) {
+            const is_set = self.bit_array.isSet(b) catch false;
+            if (!is_set) {
                 return false;
             }
         }
