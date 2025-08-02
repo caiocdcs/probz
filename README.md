@@ -5,7 +5,7 @@ Zig library for probabilistic data structures.
 Data Structures
 
 - [x] Bloom Filter
-- [ ] Scalable Bloom Filter
+- [x] Scalable Bloom Filter
 - [x] Counting Bloom Filter
 - [ ] Quotient filter
 - [ ] Cuckoo Filter
@@ -104,6 +104,35 @@ pub fn main() !void {
 
 **Important**: `remove()` is fast but requires the caller to ensure the item exists via `has()`. For automatic safety checking, use `removeSafe()` instead.
 
+### Scalable Bloom Filter
+
+```zig
+const std = @import("std");
+const ScalableBloomFilter = @import("probz").ScalableBloomFilter;
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Create with initial capacity 100, target 1% false positive rate
+    var sbf = try ScalableBloomFilter.initDefault(allocator, 100, 0.01);
+    defer sbf.deinit();
+
+    // Add many items - filter automatically scales
+    for (0..1000) |i| {
+        var buf: [32]u8 = undefined;
+        const item = try std.fmt.bufPrint(&buf, "item{}", .{i});
+        try sbf.add(item);
+    }
+
+    _ = try sbf.has("item500"); // true
+    _ = try sbf.has("item9999"); // false
+
+    std.debug.print("Filters used: {}\n", .{sbf.filterCount()});
+    std.debug.print("Items added: {}\n", .{sbf.estimatedSize()});
+}
+```
 
 ## Contributing
 
