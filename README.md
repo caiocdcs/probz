@@ -7,7 +7,7 @@ Data Structures
 - [x] Bloom Filter
 - [x] Scalable Bloom Filter
 - [x] Counting Bloom Filter
-- [ ] Quotient filter
+- [x] Quotient filter
 - [ ] Cuckoo Filter
 - [ ] HyperLogLog
 - [ ] q-digest
@@ -133,6 +133,64 @@ pub fn main() !void {
     std.debug.print("Items added: {}\n", .{sbf.estimatedSize()});
 }
 ```
+
+### Quotient Filter
+
+```zig
+const std = @import("std");
+const QuotientFilter = @import("probz").QuotientFilter;
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Create a quotient filter with 8 quotient bits (256 slots) and 8 remainder bits
+    var qf = try QuotientFilter.init(allocator, 8, 8);
+    defer qf.deinit();
+
+    // Add some items to the filter
+    try qf.set("apple");
+    try qf.set("banana");
+    try qf.set("cherry");
+
+    _ = try qf.has("apple");  // true
+    _ = try qf.has("banana"); // true
+    _ = try qf.has("grape");  // false
+
+    std.debug.print("Filter has {} slots\n", .{qf.length});
+}
+```
+
+### Quotient Filter
+
+```zig
+const std = @import("std");
+const QuotientFilter = @import("probz").QuotientFilter;
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Create a quotient filter with 8 quotient bits (256 slots) and 8 remainder bits
+    var qf = try QuotientFilter.init(allocator, 8, 8);
+    defer qf.deinit();
+
+    // Add some items to the filter
+    try qf.set("apple");
+    try qf.set("banana");
+    try qf.set("cherry");
+
+    _ = try qf.has("apple");  // true
+    _ = try qf.has("banana"); // true
+    _ = try qf.has("grape");  // false (or possibly true - false positive)
+
+    std.debug.print("Filter has {} slots\n", .{qf.length});
+}
+```
+
+
 
 ## Contributing
 
