@@ -186,6 +186,8 @@ pub fn main() !void {
     _ = try qf.has("banana"); // true
     _ = try qf.has("grape");  // false (or possibly true - false positive)
 
+    _ = try qbf.delete("banana"); // true
+
     std.debug.print("Filter has {} slots\n", .{qf.length});
 }
 ```

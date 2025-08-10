@@ -89,6 +89,70 @@ pub const QuotientFilter = struct {
         return false;
     }
 
+    /// Delete an item from the quotient filter.
+    /// Returns true if the item was found and deleted, false otherwise.
+    pub fn delete(self: *QuotientFilter, item: []const u8) !bool {
+        const hash_result = self.calcHash(item);
+        const quotient = hash_result.quotient;
+        const remainder = hash_result.remainder;
+
+        if (self.slots[quotient].occupied == 0) {
+            return false;
+        }
+
+        var current_slot = quotient;
+        var found_slot: ?u64 = null;
+
+        while (current_slot < self.length) {
+            if (self.slots[current_slot].remainder == remainder) {
+                found_slot = current_slot;
+                break;
+            }
+
+            // Stop scanning if we hit an empty slot or end of run
+            if (self.slots[current_slot].occupied == 0 or
+                (self.slots[current_slot].continuation == 0 and current_slot > quotient))
+            {
+                break;
+            }
+            current_slot += 1;
+        }
+
+        if (found_slot == null) {
+            return false;
+        }
+
+        const slot_to_delete = found_slot.?;
+
+        // Clear the slot
+        self.slots[slot_to_delete] = Slot{
+            .remainder = 0,
+            .occupied = 0,
+            .continuation = 0,
+            .shifted = 0,
+        };
+
+        // If this was the canonical slot, mark it as unoccupied
+        if (slot_to_delete == quotient) {
+            self.slots[quotient].occupied = 0;
+        }
+
+        // Shift subsequent slots back if needed
+        var shift_slot = slot_to_delete + 1;
+        while (shift_slot < self.length and self.slots[shift_slot].shifted == 1) {
+            self.slots[shift_slot - 1] = self.slots[shift_slot];
+            self.slots[shift_slot] = Slot{
+                .remainder = 0,
+                .occupied = 0,
+                .continuation = 0,
+                .shifted = 0,
+            };
+            shift_slot += 1;
+        }
+
+        return true;
+    }
+
     const QuotientHash = struct {
         quotient: u64,
         remainder: u8,
@@ -145,4 +209,25 @@ test "hash calculation" {
     const hash_result = qbf.calcHash("test");
     try testing.expect(hash_result.quotient < 16); // Should fit in 4 bits
     // remainder is u8, so it should be valid
+}
+
+test "delete" {
+    var qbf = try QuotientFilter.init(testing.allocator, 4, 8); // 16 slots, 8-bit remainder
+    defer qbf.deinit();
+
+    try qbf.set("test1");
+    try qbf.set("test2");
+    try qbf.set("test3");
+
+    try testing.expect(try qbf.has("test1"));
+    try testing.expect(try qbf.has("test2"));
+    try testing.expect(try qbf.has("test3"));
+
+    try testing.expect(try qbf.delete("test2"));
+
+    try testing.expect(try qbf.has("test1"));
+    try testing.expectEqual(false, try qbf.has("test2"));
+    try testing.expect(try qbf.has("test3"));
+
+    try testing.expectEqual(false, try qbf.delete("nonexistent"));
 }
