@@ -21,6 +21,8 @@ const HashPair = struct {
     hash2: u32,
 };
 
+/// CounterType must be a unsigned int type, it builds a bloom filter with this type as the counter type for each bit/bucket.
+/// In the future, we could use zig comptime to do a check and ensure this type is appropriate for this filter
 pub fn CountingBloomFilter(comptime CounterType: type) type {
     return struct {
         const Self = @This();

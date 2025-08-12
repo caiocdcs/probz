@@ -8,7 +8,7 @@ Data Structures
 - [x] Scalable Bloom Filter
 - [x] Counting Bloom Filter
 - [x] Quotient filter
-- [ ] Cuckoo Filter
+- [x] Cuckoo Filter
 - [ ] HyperLogLog
 - [ ] q-digest
 - [ ] t-digest
@@ -156,42 +156,49 @@ pub fn main() !void {
 
     _ = try qf.has("apple");  // true
     _ = try qf.has("banana"); // true
-    _ = try qf.has("grape");  // false
+    _ = try qf.has("grape");  // false (or possibly true - false positive)
+
+    _ = try qf.delete("banana"); // true
 
     std.debug.print("Filter has {} slots\n", .{qf.length});
 }
 ```
 
-### Quotient Filter
+### Cuckoo Filter
 
 ```zig
 const std = @import("std");
-const QuotientFilter = @import("probz").QuotientFilter;
+const CuckooFilter = @import("probz").CuckooFilter;
+
+// Default cuckoo filter with 16-bit fingerprints and 4 slots per bucket
+const DefaultCuckooFilter = @import("probz").DefaultCuckooFilter;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create a quotient filter with 8 quotient bits (256 slots) and 8 remainder bits
-    var qf = try QuotientFilter.init(allocator, 8, 8);
-    defer qf.deinit();
+    // Create a cuckoo filter with capacity for ~1000 items
+    var cf = try DefaultCuckooFilter.init(allocator, 1000);
+    defer cf.deinit();
 
     // Add some items to the filter
-    try qf.set("apple");
-    try qf.set("banana");
-    try qf.set("cherry");
+    try cf.set("apple");
+    try cf.set("banana");
+    try cf.set("cherry");
 
-    _ = try qf.has("apple");  // true
-    _ = try qf.has("banana"); // true
-    _ = try qf.has("grape");  // false (or possibly true - false positive)
+    _ = cf.has("apple");  // true
+    _ = cf.has("banana"); // true
+    _ = cf.has("grape");  // false (or possibly true - false positive)
 
-    _ = try qbf.delete("banana"); // true
+    // Cuckoo filters support deletion without false negatives
+    _ = cf.remove("banana"); // true - item was removed
+    _ = cf.has("banana");    // false
 
-    std.debug.print("Filter has {} slots\n", .{qf.length});
+    const item_count = cf.estimatedSize();
+    std.debug.print("Items in filter: {}\n", .{item_count});
 }
 ```
-
 
 
 ## Contributing

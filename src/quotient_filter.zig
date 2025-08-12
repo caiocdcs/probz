@@ -1,3 +1,11 @@
+//! Quotient filter is a space-efficient probabilistic data structure
+//! that supports membership queries, insertions, and deletions.
+//! It uses a compact representation by storing only the remainder of
+//! hash values, making it more memory-efficient than Bloom filters
+//! while supporting exact deletions without false negatives.
+//! The filter divides hash values into quotient and remainder parts,
+//! using the quotient as an index and storing the remainder.
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hash = std.hash;
