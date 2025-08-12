@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
-pub const CountingBitArrayError = error{ UnsupportedArraySize, InvalidIndex, CounterOverflow, CounterUnderflow };
+pub const CountingBitArrayError = error{ InvalidIndex, CounterOverflow, CounterUnderflow };
 
 /// Default CountingBitArray with 4-bit counters
 pub const DefaultCountingBitArray = CountingBitArray(u4);
@@ -16,8 +16,7 @@ pub fn CountingBitArray(comptime CounterType: type) type {
         length: u64,
 
         /// Initialize new CountingBitArray given allocator and length.
-        pub fn init(allocator: Allocator, length: u64) !Self {
-            if (length > std.math.maxInt(usize)) return CountingBitArrayError.UnsupportedArraySize;
+        pub fn init(allocator: Allocator, length: usize) !Self {
             const counters = try allocator.alloc(CounterType, length);
             @memset(counters, 0);
 

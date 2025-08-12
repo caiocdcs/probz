@@ -1,7 +1,7 @@
 //! Counting Bloom filter is a variant of the classical Bloom filter that supports
 //! both insertions and deletions. Instead of using single bits, it uses counters
-//! for each position, allowing items to be removed without affecting other items.
-//! When an item is added, counters are incremented; when removed, they are decremented.
+//! for each position, allowing items to be deleted without affecting other items.
+//! When an item is seted, counters are incremented; when deleted, they are decremented.
 //! This eliminates the false negative problem of trying to delete from a standard bloom filter.
 const std = @import("std");
 const hash = std.hash;
@@ -12,8 +12,6 @@ const CountingBitArray = @import("counting_bit_array.zig").CountingBitArray;
 const DefaultCountingBitArray = @import("counting_bit_array.zig").DefaultCountingBitArray;
 
 pub const CountingBloomFilterError = error{
-    UnsupportedParams,
-    CounterOverflow,
     CounterUnderflow,
 } || @import("counting_bit_array.zig").CountingBitArrayError;
 
@@ -51,7 +49,7 @@ pub fn CountingBloomFilter(comptime CounterType: type) type {
         }
 
         /// Add an item to the Counting Bloom filter.
-        pub fn add(self: *Self, item: []const u8) CountingBloomFilterError!void {
+        pub fn set(self: *Self, item: []const u8) CountingBloomFilterError!void {
             const hashes = computeHashes(item);
 
             for (0..self.k) |i| {
@@ -61,13 +59,20 @@ pub fn CountingBloomFilter(comptime CounterType: type) type {
         }
 
         /// Remove an item from the Counting Bloom filter.
-        /// Caller must ensure item exists via `has()` to avoid underflow.
-        pub fn remove(self: *Self, item: []const u8) void {
+        /// Returns true if the item was found and removed, false otherwise.
+        pub fn remove(self: *Self, item: []const u8) bool {
             const hashes = computeHashes(item);
+
+            // Check if item exists before removing
+            if (!self.has(item)) {
+                return false;
+            }
+
             for (0..self.k) |i| {
                 const idx = self.calculateIndex(&hashes, @truncate(i));
                 self.counting_array.decrementUnchecked(idx);
             }
+            return true;
         }
 
         /// Remove an item with automatic safety checking.
@@ -171,38 +176,38 @@ test "init with custom counter type" {
     defer cbf.deinit();
 }
 
-test "add and has" {
+test "set and has" {
     var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
     defer cbf.deinit();
 
     try testing.expectEqual(false, cbf.has("test"));
-    try cbf.add("test");
+    try cbf.set("test");
     try testing.expect(cbf.has("test"));
 }
 
-test "add, remove and has" {
+test "set, remove and has" {
     var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
     defer cbf.deinit();
 
-    try cbf.add("test");
+    try cbf.set("test");
     try testing.expect(cbf.has("test"));
 
-    cbf.remove("test");
+    _ = cbf.remove("test");
     try testing.expectEqual(false, cbf.has("test"));
 }
 
-test "multiple adds and single remove" {
+test "multiple sets and single remove" {
     var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
     defer cbf.deinit();
 
-    try cbf.add("test");
-    try cbf.add("test");
+    try cbf.set("test");
+    try cbf.set("test");
     try testing.expect(cbf.has("test"));
 
-    cbf.remove("test");
+    _ = cbf.remove("test");
     try testing.expect(cbf.has("test"));
 
-    cbf.remove("test");
+    _ = cbf.remove("test");
     try testing.expectEqual(false, cbf.has("test"));
 }
 
@@ -217,9 +222,9 @@ test "estimated size" {
     var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
     defer cbf.deinit();
 
-    try cbf.add("test1");
-    try cbf.add("test2");
-    try cbf.add("test3");
+    try cbf.set("test1");
+    try cbf.set("test2");
+    try cbf.set("test3");
 
     const estimated = cbf.estimatedSize();
     try testing.expectEqual(3, estimated);
@@ -229,14 +234,17 @@ test "different items" {
     var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
     defer cbf.deinit();
 
-    try cbf.add("test1");
-    try cbf.add("test2");
+    try cbf.set("test1");
+    try cbf.set("test2");
 
     try testing.expect(cbf.has("test1"));
     try testing.expect(cbf.has("test2"));
     try testing.expectEqual(false, cbf.has("test3"));
 
-    cbf.remove("test1");
+    try testing.expect(cbf.remove("test1"));
     try testing.expectEqual(false, cbf.has("test1"));
     try testing.expect(cbf.has("test2"));
+
+    // Test removing non-existent item
+    try testing.expectEqual(false, cbf.remove("nonexistent"));
 }

@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 const BITS_PER_CELL = 64;
 const CELL_TYPE = u64;
 
-pub const BitArrayError = error{ UnsupportedArraySize, InvalidBit };
+pub const BitArrayError = error{InvalidBit};
 
 pub const BitArray = struct {
     allocator: Allocator,
@@ -13,11 +13,10 @@ pub const BitArray = struct {
     length: u64,
 
     /// Initialize new BitArray given allocator and length in bits of BitArray.
-    pub fn init(allocator: Allocator, length: u64) !BitArray {
+    pub fn init(allocator: Allocator, length: usize) !BitArray {
         // determine number of bytes of memory needed
         const num_cells: u64 = if (length % BITS_PER_CELL > 0) (length / BITS_PER_CELL) + 1 else (length / BITS_PER_CELL);
 
-        if (num_cells > std.math.maxInt(usize)) return BitArrayError.UnsupportedArraySize;
         const cells = try allocator.alloc(CELL_TYPE, num_cells);
         @memset(cells, 0);
 

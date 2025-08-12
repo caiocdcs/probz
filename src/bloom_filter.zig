@@ -12,10 +12,6 @@ const math = std.math;
 const Allocator = std.mem.Allocator;
 const BitArray = @import("bit_array.zig").BitArray;
 
-pub const BloomFilterError = error{
-    UnsupportedParams,
-};
-
 /// Hash pair for double hashing optimization
 const HashPair = struct {
     hash1: u32,
@@ -30,7 +26,7 @@ pub const BloomFilter = struct {
 
     /// Return a new Bloom filter with a given number of expected entries
     /// and a desired false positive rate.
-    pub fn init(allocator: Allocator, expected_entries: u64, fp_rate: f64) !BloomFilter {
+    pub fn init(allocator: Allocator, expected_entries: usize, fp_rate: f64) !BloomFilter {
         const m = calculateM(expected_entries, fp_rate);
         const k = calculateK(m, expected_entries);
 
@@ -57,7 +53,7 @@ pub const BloomFilter = struct {
     /// filter or not. There is a possibility for a false positive with the
     /// probability being under the Bloom filter's p value, but a false negative
     /// will never occur.
-    pub fn has(self: *const BloomFilter, item: []const u8) !bool {
+    pub fn has(self: *const BloomFilter, item: []const u8) bool {
         const hashes = computeHashes(item);
 
         for (0..self.k) |i| {
@@ -138,16 +134,16 @@ test "contains" {
     defer bloom_filter.deinit();
     try bloom_filter.set("test");
 
-    try testing.expect(try bloom_filter.has("test"));
+    try testing.expect(bloom_filter.has("test"));
 }
 
-test "test contains and do not contains" {
+test "add, has" {
     var bloom_filter = try BloomFilter.init(testing.allocator, 100, 0.01);
     defer bloom_filter.deinit();
     try bloom_filter.set("test");
 
-    try testing.expect(try bloom_filter.has("test"));
-    try testing.expectEqual(false, try bloom_filter.has("test_2"));
+    try testing.expect(bloom_filter.has("test"));
+    try testing.expectEqual(false, bloom_filter.has("test_2"));
 }
 
 test "double hashing produces different results" {

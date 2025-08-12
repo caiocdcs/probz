@@ -1,17 +1,12 @@
 //! Scalable Bloom Filter is a variant that can grow dynamically to maintain
 //! a target false positive rate. It starts with a single bloom filter and
-//! adds new filters when the current one reaches capacity. Each new filter
+//! sets new filters when the current one reaches capacity. Each new filter
 //! has a tighter false positive rate to maintain the overall target rate.
 
 const std = @import("std");
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const BloomFilter = @import("bloom_filter.zig").BloomFilter;
-
-pub const ScalableBloomFilterError = error{
-    UnsupportedParams,
-    OutOfMemory,
-} || @import("bloom_filter.zig").BloomFilterError;
 
 pub const ScalableBloomFilter = struct {
     allocator: Allocator,
@@ -61,27 +56,27 @@ pub const ScalableBloomFilter = struct {
         self.filters.deinit();
     }
 
-    /// Add an item to the scalable bloom filter
-    pub fn add(self: *ScalableBloomFilter, item: []const u8) !void {
-        // Check if we need to add a new filter
+    /// Set an item in the scalable bloom filter
+    pub fn set(self: *ScalableBloomFilter, item: []const u8) !void {
+        // Check if we need to set a new filter
         const current_filter = &self.filters.items[self.filters.items.len - 1];
         const estimated_size = current_filter.estimatedSize();
         const capacity = self.calculateFilterCapacity(self.filters.items.len - 1);
 
         if (estimated_size >= capacity) {
-            try self.addNewFilter();
+            try self.setNewFilter();
         }
 
-        // Add to the most recent filter
+        // Set in the most recent filter
         const latest_filter = &self.filters.items[self.filters.items.len - 1];
         try latest_filter.set(item);
         self.item_count += 1;
     }
 
     /// Check if an item might be in the filter
-    pub fn has(self: *const ScalableBloomFilter, item: []const u8) !bool {
+    pub fn has(self: *const ScalableBloomFilter, item: []const u8) bool {
         for (self.filters.items) |*filter| {
-            if (try filter.has(item)) {
+            if (filter.has(item)) {
                 return true;
             }
         }
@@ -107,7 +102,7 @@ pub const ScalableBloomFilter = struct {
         return self.filters.items.len;
     }
 
-    fn addNewFilter(self: *ScalableBloomFilter) !void {
+    fn setNewFilter(self: *ScalableBloomFilter) !void {
         const filter_index = self.filters.items.len;
         const capacity = self.calculateFilterCapacity(filter_index);
         const fp_rate = self.calculateFilterFpRate(filter_index);
@@ -149,41 +144,41 @@ test "init with custom parameters" {
     try testing.expectEqual(@as(usize, 1), sbf.filterCount());
 }
 
-test "add and has" {
+test "set and has" {
     var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 100, 0.01);
     defer sbf.deinit();
 
-    try testing.expectEqual(false, try sbf.has("test"));
-    try sbf.add("test");
-    try testing.expect(try sbf.has("test"));
+    try testing.expectEqual(false, sbf.has("test"));
+    try sbf.set("test");
+    try testing.expect(sbf.has("test"));
 }
 
 test "multiple items" {
     var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 100, 0.01);
     defer sbf.deinit();
 
-    try sbf.add("apple");
-    try sbf.add("banana");
-    try sbf.add("cherry");
+    try sbf.set("apple");
+    try sbf.set("banana");
+    try sbf.set("cherry");
 
-    try testing.expect(try sbf.has("apple"));
-    try testing.expect(try sbf.has("banana"));
-    try testing.expect(try sbf.has("cherry"));
-    try testing.expectEqual(false, try sbf.has("grape"));
+    try testing.expect(sbf.has("apple"));
+    try testing.expect(sbf.has("banana"));
+    try testing.expect(sbf.has("cherry"));
+    try testing.expectEqual(false, sbf.has("grape"));
 }
 
 test "scaling behavior" {
     var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 5, 0.01);
     defer sbf.deinit();
 
-    // Add enough items to trigger scaling
+    // Set enough items to trigger scaling
     for (0..20) |i| {
         var buf: [32]u8 = undefined;
         const item = try std.fmt.bufPrint(&buf, "item{}", .{i});
-        try sbf.add(item);
+        try sbf.set(item);
     }
 
-    // Should have created additional filters
+    // Should have created setitional filters
     try testing.expect(sbf.filterCount() > 1);
     try testing.expectEqual(@as(u64, 20), sbf.estimatedSize());
 }
@@ -194,10 +189,10 @@ test "estimated size tracking" {
 
     try testing.expectEqual(@as(u64, 0), sbf.estimatedSize());
 
-    try sbf.add("test1");
+    try sbf.set("test2");
     try testing.expectEqual(@as(u64, 1), sbf.estimatedSize());
 
-    try sbf.add("test2");
+    try sbf.set("test2");
     try testing.expectEqual(@as(u64, 2), sbf.estimatedSize());
 }
 
@@ -208,11 +203,11 @@ test "false positive rate calculation" {
     const initial_fp = sbf.currentFpRate();
     try testing.expectEqual(0.01, initial_fp);
 
-    // Add items to trigger scaling
+    // Set items to trigger scaling
     for (0..15) |i| {
         var buf: [32]u8 = undefined;
         const item = try std.fmt.bufPrint(&buf, "item{}", .{i});
-        try sbf.add(item);
+        try sbf.set(item);
     }
 
     // FP rate should still be reasonable

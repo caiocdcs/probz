@@ -61,7 +61,7 @@ pub const QuotientFilter = struct {
     /// Returns a bool reflecting if a given object might be in the quotient
     /// filter or not. There is a possibility for a false positive, but a false negative
     /// will never occur.
-    pub fn has(self: *const QuotientFilter, item: []const u8) !bool {
+    pub fn has(self: *const QuotientFilter, item: []const u8) bool {
         const hash_result = self.calcHash(item);
         const quotient = hash_result.quotient;
         const remainder = hash_result.remainder;
@@ -89,9 +89,9 @@ pub const QuotientFilter = struct {
         return false;
     }
 
-    /// Delete an item from the quotient filter.
-    /// Returns true if the item was found and deleted, false otherwise.
-    pub fn delete(self: *QuotientFilter, item: []const u8) !bool {
+    /// remove an item from the quotient filter.
+    /// Returns true if the item was found and removed, false otherwise.
+    pub fn remove(self: *QuotientFilter, item: []const u8) bool {
         const hash_result = self.calcHash(item);
         const quotient = hash_result.quotient;
         const remainder = hash_result.remainder;
@@ -122,10 +122,10 @@ pub const QuotientFilter = struct {
             return false;
         }
 
-        const slot_to_delete = found_slot.?;
+        const slot_to_remove = found_slot.?;
 
         // Clear the slot
-        self.slots[slot_to_delete] = Slot{
+        self.slots[slot_to_remove] = Slot{
             .remainder = 0,
             .occupied = 0,
             .continuation = 0,
@@ -133,12 +133,12 @@ pub const QuotientFilter = struct {
         };
 
         // If this was the canonical slot, mark it as unoccupied
-        if (slot_to_delete == quotient) {
+        if (slot_to_remove == quotient) {
             self.slots[quotient].occupied = 0;
         }
 
         // Shift subsequent slots back if needed
-        var shift_slot = slot_to_delete + 1;
+        var shift_slot = slot_to_remove + 1;
         while (shift_slot < self.length and self.slots[shift_slot].shifted == 1) {
             self.slots[shift_slot - 1] = self.slots[shift_slot];
             self.slots[shift_slot] = Slot{
@@ -151,6 +151,18 @@ pub const QuotientFilter = struct {
         }
 
         return true;
+    }
+
+    /// Estimate the number of unique elements in the filter.
+    /// Counts occupied slots to approximate the number of items.
+    pub fn estimatedSize(self: *const QuotientFilter) u64 {
+        var count: u64 = 0;
+        for (self.slots) |slot| {
+            if (slot.occupied == 1) {
+                count += 1;
+            }
+        }
+        return count;
     }
 
     const QuotientHash = struct {
@@ -184,8 +196,8 @@ test "set and has" {
     defer qbf.deinit();
 
     try qbf.set("hello");
-    try testing.expect(try qbf.has("hello"));
-    try testing.expectEqual(false, try qbf.has("world"));
+    try testing.expect(qbf.has("hello"));
+    try testing.expectEqual(false, qbf.has("world"));
 }
 
 test "multiple items" {
@@ -196,10 +208,10 @@ test "multiple items" {
     try qbf.set("test2");
     try qbf.set("test3");
 
-    try testing.expect(try qbf.has("test1"));
-    try testing.expect(try qbf.has("test2"));
-    try testing.expect(try qbf.has("test3"));
-    try testing.expectEqual(false, try qbf.has("test4"));
+    try testing.expect(qbf.has("test1"));
+    try testing.expect(qbf.has("test2"));
+    try testing.expect(qbf.has("test3"));
+    try testing.expectEqual(false, qbf.has("test4"));
 }
 
 test "hash calculation" {
@@ -211,7 +223,7 @@ test "hash calculation" {
     // remainder is u8, so it should be valid
 }
 
-test "delete" {
+test "remove" {
     var qbf = try QuotientFilter.init(testing.allocator, 4, 8); // 16 slots, 8-bit remainder
     defer qbf.deinit();
 
@@ -219,15 +231,31 @@ test "delete" {
     try qbf.set("test2");
     try qbf.set("test3");
 
-    try testing.expect(try qbf.has("test1"));
-    try testing.expect(try qbf.has("test2"));
-    try testing.expect(try qbf.has("test3"));
+    try testing.expect(qbf.has("test1"));
+    try testing.expect(qbf.has("test2"));
+    try testing.expect(qbf.has("test3"));
 
-    try testing.expect(try qbf.delete("test2"));
+    try testing.expect(qbf.remove("test2"));
 
-    try testing.expect(try qbf.has("test1"));
-    try testing.expectEqual(false, try qbf.has("test2"));
-    try testing.expect(try qbf.has("test3"));
+    try testing.expect(qbf.has("test1"));
+    try testing.expectEqual(false, qbf.has("test2"));
+    try testing.expect(qbf.has("test3"));
 
-    try testing.expectEqual(false, try qbf.delete("nonexistent"));
+    try testing.expectEqual(false, qbf.remove("nonexistent"));
+}
+
+test "estimated size" {
+    var qbf = try QuotientFilter.init(testing.allocator, 4, 8); // 16 slots, 8-bit remainder
+    defer qbf.deinit();
+
+    try testing.expectEqual(@as(u64, 0), qbf.estimatedSize());
+
+    try qbf.set("test1");
+    try qbf.set("test2");
+    try qbf.set("test3");
+
+    try testing.expectEqual(@as(u64, 3), qbf.estimatedSize());
+
+    _ = qbf.remove("test2");
+    try testing.expectEqual(@as(u64, 2), qbf.estimatedSize());
 }
