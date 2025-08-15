@@ -55,4 +55,82 @@ pub fn build(b: *std.Build) void {
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+
+    // Example executables
+    const examples = [_][]const u8{
+        "bloom_filter",
+        "counting_bloom_filter",
+        "scalable_bloom_filter",
+        "quotient_filter",
+        "cuckoo_filter",
+    };
+
+    // Build all examples
+    for (examples) |example| {
+        const example_exe = b.addExecutable(.{
+            .name = example,
+            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        example_exe.root_module.addImport("probz", lib_mod);
+        b.installArtifact(example_exe);
+    }
+
+    // Create a single run-example command that takes the example name as argument
+    const run_example_step = b.step("run-example", "Run a specific example (usage: zig build run-example -- <example_name>)");
+
+    // Only validate and create executable if args are provided
+    if (b.args) |args| {
+        if (args.len == 0) {
+            std.debug.print("Error: Please specify an example name\n", .{});
+            std.debug.print("Available examples: {s}\n", .{examples});
+            std.process.exit(1);
+        }
+
+        const selected_example = args[0];
+
+        // Validate example name
+        var found = false;
+        for (examples) |example| {
+            if (std.mem.eql(u8, selected_example, example)) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            std.debug.print("Error: Unknown example '{s}'\n", .{selected_example});
+            std.debug.print("Available examples: {s}\n", .{examples});
+            std.process.exit(1);
+        }
+
+        // Create and run the specified example
+        const example_exe = b.addExecutable(.{
+            .name = b.fmt("run_{s}", .{selected_example}),
+            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{selected_example})),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        example_exe.root_module.addImport("probz", lib_mod);
+        const run_example = b.addRunArtifact(example_exe);
+        run_example_step.dependOn(&run_example.step);
+    }
+
+    // Create a step to run all examples
+    const run_all_examples_step = b.step("run-examples", "Run all examples");
+    for (examples) |example| {
+        const example_exe_all = b.addExecutable(.{
+            .name = b.fmt("{s}_all", .{example}),
+            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
+            .target = target,
+            .optimize = optimize,
+        });
+        example_exe_all.root_module.addImport("probz", lib_mod);
+
+        const run_example_all = b.addRunArtifact(example_exe_all);
+        run_all_examples_step.dependOn(&run_example_all.step);
+    }
 }
