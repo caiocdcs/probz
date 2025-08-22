@@ -69,9 +69,11 @@ pub fn build(b: *std.Build) void {
     for (examples) |example| {
         const example_exe = b.addExecutable(.{
             .name = example,
-            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
 
         example_exe.root_module.addImport("probz", lib_mod);
@@ -85,7 +87,10 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         if (args.len == 0) {
             std.debug.print("Error: Please specify an example name\n", .{});
-            std.debug.print("Available examples: {s}\n", .{examples});
+            for (examples) |example| {
+                std.debug.print(" {s}", .{example});
+            }
+            std.debug.print("\n", .{});
             std.process.exit(1);
         }
 
@@ -102,16 +107,21 @@ pub fn build(b: *std.Build) void {
 
         if (!found) {
             std.debug.print("Error: Unknown example '{s}'\n", .{selected_example});
-            std.debug.print("Available examples: {s}\n", .{examples});
+            for (examples) |example| {
+                std.debug.print(" {s}", .{example});
+            }
+            std.debug.print("\n", .{});
             std.process.exit(1);
         }
 
         // Create and run the specified example
         const example_exe = b.addExecutable(.{
             .name = b.fmt("run_{s}", .{selected_example}),
-            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{selected_example})),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("examples/{s}.zig", .{selected_example})),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
 
         example_exe.root_module.addImport("probz", lib_mod);
@@ -124,9 +134,11 @@ pub fn build(b: *std.Build) void {
     for (examples) |example| {
         const example_exe_all = b.addExecutable(.{
             .name = b.fmt("{s}_all", .{example}),
-            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
         example_exe_all.root_module.addImport("probz", lib_mod);
 

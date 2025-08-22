@@ -4,13 +4,13 @@
 //! has a tighter false positive rate to maintain the overall target rate.
 
 const std = @import("std");
-const ArrayList = std.ArrayList;
+const array_list = std.array_list;
 const Allocator = std.mem.Allocator;
 const BloomFilter = @import("bloom_filter.zig").BloomFilter;
 
 pub const ScalableBloomFilter = struct {
     allocator: Allocator,
-    filters: ArrayList(BloomFilter),
+    filters: array_list.Managed(BloomFilter),
     initial_capacity: u64,
     target_fp_rate: f64,
     growth_factor: u64,
@@ -27,7 +27,7 @@ pub const ScalableBloomFilter = struct {
         growth_factor: u64,
         fp_tightening_ratio: f64,
     ) !ScalableBloomFilter {
-        var filters = ArrayList(BloomFilter).init(allocator);
+        var filters = array_list.Managed(BloomFilter).init(allocator);
 
         // Create initial filter
         const initial_filter = try BloomFilter.init(allocator, initial_capacity, target_fp_rate);
