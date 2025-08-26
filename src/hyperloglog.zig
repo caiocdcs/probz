@@ -57,15 +57,15 @@ pub const HyperLogLog = struct {
 
     /// Add an element to the HyperLogLog estimator.
     pub fn add(self: *HyperLogLog, item: []const u8) void {
-        const hash_value = hash.XxHash64.hash(0, item);
+        const hash_value = hash.XxHash32.hash(0, item);
 
         // Use leftmost precision bits for bucket index
-        const index = hash_value >> @intCast(64 - self.precision);
+        const index = hash_value >> @intCast(32 - self.precision);
 
         // Shift out index bits and count leading zeros in remaining bits
         const w = hash_value << @intCast(self.precision);
         const leading_zeros = @clz(w);
-        const rank = @min(@as(u6, 63), @as(u6, @intCast(leading_zeros + 1)));
+        const rank = @min(@as(u6, 31), @as(u6, @intCast(leading_zeros + 1)));
 
         self.buckets[index] = @max(self.buckets[index], rank);
     }
@@ -85,13 +85,12 @@ pub const HyperLogLog = struct {
         const raw_estimate = alpha_m * m * m / sum;
 
         // Apply range corrections
-        const estimate = if (raw_estimate <= 2.5 * m and zeros > 0) { // Small range correction (linear counting)
-            m * math.log(f64, math.e, m / @as(f64, @floatFromInt(zeros)));
-        } else if (raw_estimate <= (1.0 / 30.0) * (1 << 32)) { // Intermediate range - use raw estimate
-            raw_estimate;
-        } else { // Large range correction
-            return -1 * (1 << 32) * math.log(f64, math.e, 1.0 - raw_estimate / (1 << 32));
-        };
+        const estimate = if (raw_estimate <= 2.5 * m and zeros > 0) // Small range correction (linear counting)
+            m * math.log(f64, math.e, m / @as(f64, @floatFromInt(zeros)))
+        else if (raw_estimate <= (1.0 / 30.0) * math.pow(f64, 2.0, 32.0)) // Intermediate range - use raw estimate
+            raw_estimate
+        else // Large range correction
+            -1 * math.pow(f64, 2.0, 32.0) * math.log(f64, math.e, 1.0 - raw_estimate / math.pow(f64, 2.0, 32.0));
 
         return @max(0.0, estimate);
     }
