@@ -63,6 +63,7 @@ pub fn build(b: *std.Build) void {
         "scalable_bloom_filter",
         "quotient_filter",
         "cuckoo_filter",
+        "hyperloglog",
     };
 
     // Build all examples

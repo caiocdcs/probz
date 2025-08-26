@@ -9,7 +9,7 @@ Data Structures
 - [x] Counting Bloom Filter
 - [x] Quotient filter
 - [x] Cuckoo Filter
-- [ ] HyperLogLog
+- [x] HyperLogLog
 - [ ] q-digest
 - [ ] t-digest
 - [ ] Top-K
@@ -43,6 +43,7 @@ See the [`examples/`](examples/) directory for complete working examples of all 
 - **Scalable Bloom Filter** - Auto-scaling for growing datasets
 - **Quotient Filter** - Space-efficient alternative with deletion
 - **Cuckoo Filter** - High-performance filter with excellent deletion support
+- **HyperLogLog** - Probabilistic cardinality estimation with merge support
 
 ### Running Examples
 
