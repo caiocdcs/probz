@@ -4,13 +4,13 @@
 //! has a tighter false positive rate to maintain the overall target rate.
 
 const std = @import("std");
-const array_list = std.array_list;
+const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const BloomFilter = @import("bloom_filter.zig").BloomFilter;
 
 pub const ScalableBloomFilter = struct {
     allocator: Allocator,
-    filters: array_list.Managed(BloomFilter),
+    filters: ArrayList(BloomFilter),
     initial_capacity: u64,
     target_fp_rate: f64,
     growth_factor: u64,
@@ -27,11 +27,11 @@ pub const ScalableBloomFilter = struct {
         growth_factor: u64,
         fp_tightening_ratio: f64,
     ) !ScalableBloomFilter {
-        var filters = array_list.Managed(BloomFilter).init(allocator);
+        var filters = try ArrayList(BloomFilter).initCapacity(allocator, 1);
 
         // Create initial filter
         const initial_filter = try BloomFilter.init(allocator, initial_capacity, target_fp_rate);
-        try filters.append(initial_filter);
+        try filters.append(allocator, initial_filter);
 
         return ScalableBloomFilter{
             .allocator = allocator,
@@ -53,7 +53,7 @@ pub const ScalableBloomFilter = struct {
         for (self.filters.items) |*filter| {
             filter.deinit();
         }
-        self.filters.deinit();
+        self.filters.deinit(self.allocator);
     }
 
     /// Set an item in the scalable bloom filter
@@ -108,7 +108,7 @@ pub const ScalableBloomFilter = struct {
         const fp_rate = self.calculateFilterFpRate(filter_index);
 
         const new_filter = try BloomFilter.init(self.allocator, capacity, fp_rate);
-        try self.filters.append(new_filter);
+        try self.filters.append(self.allocator, new_filter);
     }
 
     fn calculateFilterCapacity(self: *const ScalableBloomFilter, filter_index: usize) u64 {
