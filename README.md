@@ -1,6 +1,6 @@
 # Probz
 
-Zig library for probabilistic data structures.
+Zig library for probabilistic data structures. Compatible with Zig 0.15.1.
 
 Data Structures
 
