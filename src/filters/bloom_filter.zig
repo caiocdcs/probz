@@ -101,9 +101,13 @@ fn calculateK(length: u64, expected_entries: u64) u64 {
 
 /// Compute hash pair once for reuse, it uses a double hashing approach, to avoid calculate k hash functions
 inline fn computeHashes(item: []const u8) HashPair {
-    const hash1 = hash.Murmur3_32.hash(item);
-    const hash2 = hash.XxHash32.hash(hash1, item);
-    return HashPair{ .hash1 = hash1, .hash2 = hash2 };
+    const h = hash.XxHash64.hash(0, item);
+    const h1: u32 = @truncate(h);
+    const h2: u32 = @truncate(h >> 32);
+    return HashPair{
+        .hash1 = h1,
+        .hash2 = h2 | 1,
+    };
 }
 
 const testing = std.testing;
