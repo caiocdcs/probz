@@ -44,6 +44,7 @@ See the [`examples/`](examples/) directory for complete working examples of all 
 - **Quotient Filter** - Space-efficient alternative with deletion
 - **Cuckoo Filter** - High-performance filter with excellent deletion support
 - **HyperLogLog** - Probabilistic cardinality estimation with merge support
+- **Count-Min Sketch** - Approximate frequency estimation with sublinear space
 - **Q-digest** - Approximate quantile estimation for streaming data
 
 ### Running Examples
