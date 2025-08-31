@@ -13,7 +13,7 @@ Data Structures
 - [ ] q-digest
 - [ ] t-digest
 - [ ] Top-K
-- [ ] Count-min sketch
+- [x] Count-min sketch
 - [ ] Locality–Sensitive Hashing
 
 ## Adding to a project
@@ -39,7 +39,7 @@ exe.root_module.addImport("probz", probz.module("probz"));
 See the [`examples/`](examples/) directory for complete working examples of all data structures:
 
 - **Bloom Filter** - Basic probabilistic membership testing
-- **Counting Bloom Filter** - Bloom filter with removal support  
+- **Counting Bloom Filter** - Bloom filter with removal support
 - **Scalable Bloom Filter** - Auto-scaling for growing datasets
 - **Quotient Filter** - Space-efficient alternative with deletion
 - **Cuckoo Filter** - High-performance filter with excellent deletion support
