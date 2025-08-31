@@ -32,8 +32,6 @@ pub fn main() !void {
     std.debug.print("cherry ~ {}\n", .{cherry_count});
     std.debug.print("grape  ~ {}\n", .{grape_count});
 
-    std.debug.print("Total estimatedSize (items added): {}\n", .{cms.estimatedSize()});
-
     // Initialize with explicit dimensions (width, depth)
     // width controls accuracy (columns), depth controls confidence (rows)
     var cms2 = try DefaultCountMinSketch.init(allocator, @intCast(cms.width), cms.depth);
@@ -48,5 +46,4 @@ pub fn main() !void {
     std.debug.print("\nAfter merge:\n", .{});
     std.debug.print("banana ~ {}\n", .{cms.estimate("banana")}); // >= 3 + 2
     std.debug.print("dragonfruit ~ {}\n", .{cms.estimate("dragonfruit")}); // >= 4
-    std.debug.print("Total estimatedSize (items added): {}\n", .{cms.estimatedSize()});
 }
