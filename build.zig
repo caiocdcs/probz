@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
         "quotient_filter",
         "cuckoo_filter",
         "hyperloglog",
+        "count_min_sketch",
     };
 
     // Build all examples
