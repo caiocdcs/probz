@@ -57,7 +57,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_unit_tests.step);
 
     // Example executables
-    const examples = [_][]const u8{ "bloom_filter", "counting_bloom_filter", "scalable_bloom_filter", "quotient_filter", "cuckoo_filter", "hyperloglog", "count_min_sketch", "qdigest" };
+    const examples = [_][]const u8{
+        "bloom_filter",
+        "counting_bloom_filter",
+        "scalable_bloom_filter",
+        "quotient_filter",
+        "cuckoo_filter",
+        "hyperloglog",
+        "count_min_sketch",
+        "tdigest",
+        "qdigest",
+    };
 
     // Build all examples
     for (examples) |example| {

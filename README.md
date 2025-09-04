@@ -11,7 +11,7 @@ Data Structures
 - [x] Cuckoo Filter
 - [x] HyperLogLog
 - [x] q-digest
-- [ ] t-digest
+- [x] t-digest
 - [ ] Top-K
 - [x] Count-min sketch
 - [ ] Locality–Sensitive Hashing
@@ -45,6 +45,7 @@ See the [`examples/`](examples/) directory for complete working examples of all 
 - **Cuckoo Filter** - High-performance filter with excellent deletion support
 - **HyperLogLog** - Probabilistic cardinality estimation with merge support
 - **Count-Min Sketch** - Approximate frequency estimation with sublinear space
+- **T-digest** - High-accuracy quantile estimation, especially for extreme percentiles
 - **Q-digest** - Approximate quantile estimation for streaming data
 
 ### Running Examples

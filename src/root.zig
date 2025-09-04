@@ -8,6 +8,7 @@ pub const DefaultCuckooFilter = cuckoo_filter.DefaultCuckooFilter;
 
 pub const CountMinSketch = count_min_sketch.CountMinSketch;
 pub const DefaultCountMinSketch = count_min_sketch.DefaultCountMinSketch;
+pub const TDigest = tdigest.TDigest;
 pub const HyperLogLog = hyperloglog.HyperLogLog;
 pub const QDigest = qdigest.QDigest;
 
@@ -17,6 +18,7 @@ const scalable_bloom_filter = @import("filters/scalable_bloom_filter.zig");
 const quotient_filter = @import("filters/quotient_filter.zig");
 const cuckoo_filter = @import("filters/cuckoo_filter.zig");
 const count_min_sketch = @import("count_min_sketch.zig");
+const tdigest = @import("tdigest.zig");
 const hyperloglog = @import("hyperloglog.zig");
 const qdigest = @import("qdigest.zig");
 
