@@ -12,7 +12,7 @@ Data Structures
 - [x] HyperLogLog
 - [x] q-digest
 - [x] t-digest
-- [ ] Top-K
+- [x] Top-K
 - [x] Count-min sketch
 - [ ] Locality–Sensitive Hashing
 
@@ -45,6 +45,7 @@ See the [`examples/`](examples/) directory for complete working examples of all 
 - **Cuckoo Filter** - High-performance filter with excellent deletion support
 - **HyperLogLog** - Probabilistic cardinality estimation with merge support
 - **Count-Min Sketch** - Approximate frequency estimation with sublinear space
+- **Top-K** - Find the most frequent items from any frequency estimator
 - **T-digest** - High-accuracy quantile estimation, especially for extreme percentiles
 - **Q-digest** - Approximate quantile estimation for streaming data
 
@@ -53,6 +54,7 @@ See the [`examples/`](examples/) directory for complete working examples of all 
 ```bash
 # Run specific example
 zig build run-example -- bloom_filter
+zig build run-example -- top_k_example
 
 # Run all examples
 zig build run-examples

@@ -65,6 +65,7 @@ pub fn build(b: *std.Build) void {
         "cuckoo_filter",
         "hyperloglog",
         "count_min_sketch",
+        "top_k_example",
         "tdigest",
         "qdigest",
     };
