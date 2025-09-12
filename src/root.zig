@@ -13,6 +13,9 @@ pub const TopKItem = top_k_tracker.TopKItem;
 pub const TDigest = tdigest.TDigest;
 pub const HyperLogLog = hyperloglog.HyperLogLog;
 pub const QDigest = qdigest.QDigest;
+pub const LSH = lsh.LSH;
+pub const DefaultLSH = lsh.DefaultLSH;
+pub const Candidate = lsh.Candidate;
 
 const bloom_filter = @import("filters/bloom_filter.zig");
 const counting_bloom_filter = @import("filters/counting_bloom_filter.zig");
@@ -24,6 +27,7 @@ const top_k_tracker = @import("top_k_tracker.zig");
 const tdigest = @import("tdigest.zig");
 const hyperloglog = @import("hyperloglog.zig");
 const qdigest = @import("qdigest.zig");
+const lsh = @import("lsh.zig");
 
 const std = @import("std");
 test {

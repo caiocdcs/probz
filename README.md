@@ -14,7 +14,7 @@ Data Structures
 - [x] t-digest
 - [x] Top-K
 - [x] Count-min sketch
-- [ ] Locality–Sensitive Hashing
+- [x] Locality–Sensitive Hashing
 
 ## Adding to a project
 Run the following command to add the package to your project.
@@ -48,13 +48,14 @@ See the [`examples/`](examples/) directory for complete working examples of all 
 - **Top-K** - Find the most frequent items from any frequency estimator
 - **T-digest** - High-accuracy quantile estimation, especially for extreme percentiles
 - **Q-digest** - Approximate quantile estimation for streaming data
+- **Locality-Sensitive Hashing** - Fast approximate similarity search for high-dimensional data
 
 ### Running Examples
 
 ```bash
 # Run specific example
 zig build run-example -- bloom_filter
-zig build run-example -- top_k_example
+zig build run-example -- lsh
 
 # Run all examples
 zig build run-examples

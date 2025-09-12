@@ -68,6 +68,7 @@ pub fn build(b: *std.Build) void {
         "top_k_example",
         "tdigest",
         "qdigest",
+        "lsh",
     };
 
     // Build all examples
