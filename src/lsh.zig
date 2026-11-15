@@ -71,7 +71,15 @@ pub fn LSH(comptime HashType: type) type {
         /// num_hashes: total number of hash functions (should be bands * rows_per_band)
         /// bands: number of bands for LSH banding
         /// rows_per_band: number of rows per band
+        /// Seed used by `init` so indexes built separately are comparable.
+        pub const default_seed: u64 = 0x5052_425A_4C53_4831;
+
         pub fn init(allocator: Allocator, num_hashes: u32, bands: u32, rows_per_band: u32) !Self {
+            return initSeeded(allocator, num_hashes, bands, rows_per_band, default_seed);
+        }
+
+        /// Like `init`, with an explicit seed for the MinHash coefficients.
+        pub fn initSeeded(allocator: Allocator, num_hashes: u32, bands: u32, rows_per_band: u32, seed: u64) !Self {
             if (num_hashes == 0 or bands == 0 or rows_per_band == 0) {
                 return LSHError.InvalidParameters;
             }
@@ -81,7 +89,7 @@ pub fn LSH(comptime HashType: type) type {
             }
 
             // Generate random coefficients for universal hashing
-            var rng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
+            var rng = std.Random.DefaultPrng.init(seed);
             const random = rng.random();
 
             const hash_coeffs = try allocator.alloc(HashCoeff, num_hashes);

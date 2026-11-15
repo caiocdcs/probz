@@ -30,6 +30,8 @@ pub fn CuckooFilter(comptime Fingerprint: type, comptime bucket_size: comptime_i
         allocator: Allocator,
         buckets: []Bucket,
         length: usize,
+        /// Deterministic PRNG used to pick eviction victims.
+        prng: std.Random.DefaultPrng,
 
         /// Initialize a new Cuckoo filter with the specified capacity.
         /// The actual number of buckets will be rounded up to the next power of two.
@@ -40,7 +42,7 @@ pub fn CuckooFilter(comptime Fingerprint: type, comptime bucket_size: comptime_i
                 bucket.* = [_]?Fingerprint{null} ** bucket_size;
             }
 
-            return Self{ .allocator = allocator, .buckets = buckets, .length = length };
+            return Self{ .allocator = allocator, .buckets = buckets, .length = length, .prng = .init(0) };
         }
 
         /// Free the memory allocated for the filter.
@@ -93,7 +95,7 @@ pub fn CuckooFilter(comptime Fingerprint: type, comptime bucket_size: comptime_i
 
             var kicks: u16 = 0;
             while (kicks < max_kicks) {
-                const random_slot = std.crypto.random.intRangeLessThan(u8, 0, bucket_size);
+                const random_slot = self.prng.random().intRangeLessThan(u8, 0, bucket_size);
                 const bucket = &self.buckets[current_bucket];
 
                 const temp_fp = bucket[random_slot].?;

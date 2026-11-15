@@ -1,6 +1,6 @@
 # Probz
 
-Zig library for probabilistic data structures. Compatible with Zig 0.15.1.
+Zig library for probabilistic data structures. Requires Zig 0.16.0 or newer.
 
 Data Structures
 
@@ -54,14 +54,17 @@ See the [`examples/`](examples/) directory for complete working examples of all 
 
 ```bash
 # Run specific example
-zig build run-example -- bloom_filter
-zig build run-example -- lsh
+zig build run-example -Dexample=bloom_filter
+zig build run-example -Dexample=lsh
 
 # Run all examples
 zig build run-examples
 
-# See available examples
-zig build --help
+# Build all examples into zig-out/bin
+zig build examples
+
+# Generate API docs into zig-out/docs
+zig build docs
 ```
 
 
