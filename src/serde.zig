@@ -54,14 +54,14 @@ pub fn fromInitError(err: error{ InvalidParameters, OutOfMemory }) ReadError {
 pub fn writeHeader(w: *Writer, tag: Tag) WriteError!void {
     try w.writeAll(magic);
     try w.writeByte(version);
-    try w.writeByte(@intFromEnum(tag));
+    try w.writeByte(@backingInt(tag));
 }
 
 pub fn readHeader(r: *Reader, expected: Tag) ReadError!void {
     const m = try r.takeArray(4);
     if (!std.mem.eql(u8, m, magic)) return error.InvalidMagic;
     if (try r.takeByte() != version) return error.UnsupportedVersion;
-    if (try r.takeByte() != @intFromEnum(expected)) return error.WrongStructure;
+    if (try r.takeByte() != @backingInt(expected)) return error.WrongStructure;
 }
 
 pub fn writeInt(w: *Writer, comptime T: type, value: T) WriteError!void {

@@ -5,7 +5,7 @@ algorithm, links to the paper it implements, serializes to a portable binary
 format, and is pinned by golden test vectors, so implementations in other
 languages can produce identical results ([SPEC.md](SPEC.md)).
 
-Requires Zig 0.16.0 or newer.
+Requires Zig 0.17.1 or newer.
 
 ## Structures
 
@@ -48,7 +48,7 @@ follows, and notes any deliberate deviation.
 ## Install
 
 ```sh
-zig fetch --save git+https://github.com/caiocdcs/probz#main
+zig fetch --save git+https://github.com/caiocdcs/probz#v0.1.0
 ```
 
 ```zig

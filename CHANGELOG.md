@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-15)
 
 First versioned release. Every structure was reviewed against its paper.
 The API changed throughout, so expect to update call sites.
 
 ### Build and packaging
-- Requires Zig 0.16.0.
+- Requires Zig 0.17.1.
 - The package now exports a `probz` module (`dep.module("probz")`).
   Previously no module was exported, so dependents could not import it.
 - New steps: `examples`, `run-example -Dexample=<name>`, `bench`, `docs`,

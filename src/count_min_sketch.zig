@@ -40,7 +40,7 @@ pub fn CountMinSketch(comptime Counter: type) type {
 
     return struct {
         const Self = @This();
-        const Wire = std.meta.Int(.unsigned, ((info.int.bits + 7) / 8) * 8);
+        const Wire = @Int(.unsigned, ((info.int.bits + 7) / 8) * 8);
 
         width: u64,
         depth: u32,

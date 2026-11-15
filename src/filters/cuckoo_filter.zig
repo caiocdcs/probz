@@ -48,7 +48,7 @@ pub fn CuckooFilter(comptime Fingerprint: type, comptime bucket_size: comptime_i
     return struct {
         const Self = @This();
         const fp_bits = info.int.bits;
-        const Wire = std.meta.Int(.unsigned, ((fp_bits + 7) / 8) * 8);
+        const Wire = @Int(.unsigned, ((fp_bits + 7) / 8) * 8);
         /// Paper Algorithm 1, MaxNumKicks.
         pub const max_kicks = 500;
         const empty: Fingerprint = 0;

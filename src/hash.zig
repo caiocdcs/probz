@@ -45,13 +45,13 @@ pub fn hashKey(key: anytype) u64 {
     switch (@typeInfo(T)) {
         .int, .comptime_int => {
             const I = if (T == comptime_int) i64 else T;
-            const Bytes = std.meta.Int(.unsigned, @sizeOf(I) * 8);
+            const Bytes = @Int(.unsigned, @sizeOf(I) * 8);
             var buf: [@sizeOf(I)]u8 = undefined;
-            std.mem.writeInt(Bytes, &buf, @bitCast(@as(std.meta.Int(@typeInfo(I).int.signedness, @sizeOf(I) * 8), key)), .little);
+            std.mem.writeInt(Bytes, &buf, @bitCast(@as(@Int(@typeInfo(I).int.signedness, @sizeOf(I) * 8), key)), .little);
             return hashBytes(&buf);
         },
         .float => {
-            const Bits = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const Bits = @Int(.unsigned, @bitSizeOf(T));
             return hashKey(@as(Bits, @bitCast(key)));
         },
         .bool => return hashBytes(&.{@intFromBool(key)}),

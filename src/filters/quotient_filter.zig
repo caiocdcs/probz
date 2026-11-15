@@ -49,8 +49,8 @@ pub fn QuotientFilter(comptime r_bits: u16) type {
 
     return struct {
         const Self = @This();
-        pub const Remainder = std.meta.Int(.unsigned, r_bits);
-        const Wire = std.meta.Int(.unsigned, ((r_bits + 7) / 8) * 8);
+        pub const Remainder = @Int(.unsigned, r_bits);
+        const Wire = @Int(.unsigned, ((r_bits + 7) / 8) * 8);
 
         q: u6,
         remainders: []Remainder,
