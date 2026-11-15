@@ -232,3 +232,55 @@ false negatives that Fan et al. warn about.
   <https://pages.cs.wisc.edu/~cao/papers/summary-cache/node8.html>)
 
 Vector: `testdata/vectors/counting_bloom_filter.json`.
+
+### 5.3 Scalable Bloom filter (tag 3)
+
+**Parameters.** Initial capacity n₀ > 0, target rate P in (0, 1), growth
+s ≥ 2 (default 2), and tightening r in (0, 1) (default 0.9).
+
+**Stages.** Stage i (from 0) is a Bloom filter (§5.1) built with
+`init(expected_items = n_i, fp_rate = P_i)`, where
+
+```
+P_0 = P · (1 - r)
+P_i = P_0 · r^i            (computed as P_0 · pow(r, i))
+n_i = n_0 · s^i
+```
+
+The compound rate is bounded by Σ P_i ≤ P₀ / (1 − r) = P.
+
+**Add.** If `contains(item)`, return false and change nothing. Otherwise,
+if the newest stage's count has reached n_i, append stage i + 1. Then add
+the item to the newest stage, increment that stage's count, and return
+true.
+
+**Contains.** True iff any stage contains the item.
+
+**Merge.** Not supported.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| n₀ | u64 |
+| P | f64 |
+| s | u32 |
+| r | f64 |
+| stage count L | u32 (≥ 1) |
+| L × stage | u64 count, u32 k, bit array (§3.1) |
+
+Readers recompute each stage's m and k from the parameters and reject
+mismatches.
+
+**Deviation.** The paper uses partitioned ("sliced") filters and a
+fill-ratio limit. probz uses standard Bloom filters sized for (n_i, P_i),
+which meet the same per-stage rate at capacity.
+
+**References.**
+- Paulo Sérgio Almeida, Carlos Baquero, Nuno Preguiça, David Hutchison,
+  "Scalable Bloom Filters", Information Processing Letters 101(6):255–261,
+  2007: §3 (error bound), §4.1 (s = 2 or 4), §4.2 (r ≈ 0.8–0.9).
+  <https://doi.org/10.1016/j.ipl.2006.10.007> (author PDF:
+  <https://gsd.di.uminho.pt/members/cbm/ps/dbloom.pdf>)
+
+Vector: `testdata/vectors/scalable_bloom_filter.json`.

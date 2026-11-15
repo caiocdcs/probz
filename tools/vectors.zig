@@ -25,6 +25,7 @@ pub const cases = [_]Case{
     .{ .name = "hash", .generate = genHash },
     .{ .name = "bloom_filter", .generate = genBloom },
     .{ .name = "counting_bloom_filter", .generate = genCountingBloom },
+    .{ .name = "scalable_bloom_filter", .generate = genScalableBloom },
 };
 
 /// "item-{i}" for i in [0, n).
@@ -130,6 +131,31 @@ fn genCountingBloom(arena: Allocator) anyerror![]const u8 {
         .counts = counts,
         .non_zero = cbf.nonZeroCount(),
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cbf)),
+    });
+}
+
+fn genScalableBloom(arena: Allocator) anyerror![]const u8 {
+    var sbf = try probz.ScalableBloomFilter.init(arena, .{ .initial_capacity = 20, .fp_rate = 0.01, .growth = 2, .tightening = 0.9 });
+    const items = try inputs(arena, 200);
+    for (items[0..100]) |item| _ = try sbf.add(arena, item);
+
+    const Stage = struct { capacity: u64, count: u64, bit_count: u64, hash_count: u32 };
+    const stages = try arena.alloc(Stage, sbf.stageCount());
+    for (sbf.stages.items, stages) |s, *out| out.* = .{
+        .capacity = s.capacity,
+        .count = s.count,
+        .bit_count = s.filter.bitCount(),
+        .hash_count = s.filter.k,
+    };
+    const present = try arena.alloc(bool, items.len);
+    for (items, present) |item, *p| p.* = sbf.contains(item);
+
+    return toJson(arena, .{
+        .description = "Scalable Bloom filter (SPEC.md §5.3): init(initial_capacity=20, fp_rate=0.01, growth=2, tightening=0.9), add item-0..item-99, query item-0..item-199",
+        .params = .{ .initial_capacity = 20, .fp_rate = 0.01, .growth = 2, .tightening = 0.9 },
+        .stages = stages,
+        .contains = present,
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, sbf)),
     });
 }
 

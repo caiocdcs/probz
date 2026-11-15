@@ -1,216 +1,290 @@
-//! Scalable Bloom Filter is a variant that can grow dynamically to maintain
-//! a target false positive rate. It starts with a single bloom filter and
-//! sets new filters when the current one reaches capacity. Each new filter
-//! has a tighter false positive rate to maintain the overall target rate.
+//! Scalable Bloom filter: a chain of Bloom filters that grows as items
+//! arrive while keeping the compound false-positive rate below a target.
+//! See SPEC.md §5.3.
+//!
+//! Stage i has capacity n_i = n_0 · s^i and error rate P_i = P_0 · r^i,
+//! with P_0 = P · (1 − r). The compound rate is therefore bounded by
+//! Σ P_0 · r^i ≤ P_0 / (1 − r) = P (paper §3). A new stage is appended
+//! when the newest stage has received n_i items. Items that the filter
+//! already reports as present (true duplicates, or rare false positives)
+//! are not inserted again, so duplicates do not consume capacity; `count`
+//! can therefore be slightly lower than the number of distinct items.
+//!
+//! Deviation from the paper: each stage is a standard Bloom filter
+//! (`BloomFilter`) sized for (n_i, P_i), rather than a partitioned
+//! ("sliced") filter with a fill-ratio limit. Both meet P_i at n_i items.
+//!
+//! # References
+//!
+//! - Paulo Sérgio Almeida, Carlos Baquero, Nuno Preguiça, David Hutchison,
+//!   "Scalable Bloom Filters", Information Processing Letters
+//!   101(6):255–261, 2007. §3 (compound error bound P ≤ P_0 / (1 − r)),
+//!   §4.1 (growth factor s = 2 or 4), §4.2 (tightening ratio r ≈ 0.8–0.9).
+//!   https://doi.org/10.1016/j.ipl.2006.10.007
+//!   (author PDF: https://gsd.di.uminho.pt/members/cbm/ps/dbloom.pdf)
 
 const std = @import("std");
-const ArrayList = std.ArrayList;
+const math = std.math;
 const Allocator = std.mem.Allocator;
+
 const BloomFilter = @import("bloom_filter.zig").BloomFilter;
+const BitArray = @import("bit_array.zig").BitArray;
+const hashing = @import("../hash.zig");
+const serde = @import("../serde.zig");
 
 pub const ScalableBloomFilter = struct {
-    allocator: Allocator,
-    filters: ArrayList(BloomFilter),
-    initial_capacity: u64,
-    target_fp_rate: f64,
-    growth_factor: u64,
-    fp_tightening_ratio: f64,
-    item_count: u64,
+    options: Options,
+    /// P_0 = P · (1 − r).
+    first_fp_rate: f64,
+    stages: std.ArrayList(Stage),
 
-    /// Create a new Scalable Bloom Filter with initial capacity and target false positive rate.
-    /// growth_factor: how much each new filter grows (default: 2x)
-    /// fp_tightening_ratio: how much to tighten FP rate for each new filter (default: 0.5x)
-    pub fn init(
-        allocator: Allocator,
+    pub const Stage = struct {
+        filter: BloomFilter,
+        /// Items inserted into this stage.
+        count: u64,
+        capacity: u64,
+    };
+
+    pub const Options = struct {
+        /// Capacity n_0 of the first stage (> 0).
         initial_capacity: u64,
-        target_fp_rate: f64,
-        growth_factor: u64,
-        fp_tightening_ratio: f64,
-    ) !ScalableBloomFilter {
-        var filters = try ArrayList(BloomFilter).initCapacity(allocator, 1);
+        /// Target compound false-positive rate P (0 < P < 1).
+        fp_rate: f64 = 0.01,
+        /// Capacity growth factor s per stage (≥ 2). The paper recommends 2 or 4.
+        growth: u32 = 2,
+        /// Error tightening ratio r (0 < r < 1). The paper recommends 0.8–0.9.
+        tightening: f64 = 0.9,
+    };
 
-        // Create initial filter
-        const initial_filter = try BloomFilter.init(allocator, .{ .expected_items = initial_capacity, .fp_rate = target_fp_rate });
-        try filters.append(allocator, initial_filter);
+    pub const InitError = error{InvalidParameters} || Allocator.Error;
 
-        return ScalableBloomFilter{
-            .allocator = allocator,
-            .filters = filters,
-            .initial_capacity = initial_capacity,
-            .target_fp_rate = target_fp_rate,
-            .growth_factor = growth_factor,
-            .fp_tightening_ratio = fp_tightening_ratio,
-            .item_count = 0,
+    pub fn init(allocator: Allocator, options: Options) InitError!ScalableBloomFilter {
+        if (options.initial_capacity == 0 or options.growth < 2 or
+            !(options.fp_rate > 0 and options.fp_rate < 1) or
+            !(options.tightening > 0 and options.tightening < 1))
+            return error.InvalidParameters;
+
+        var self: ScalableBloomFilter = .{
+            .options = options,
+            .first_fp_rate = options.fp_rate * (1.0 - options.tightening),
+            .stages = .empty,
         };
+        errdefer self.deinit(allocator);
+        try self.addStage(allocator);
+        return self;
     }
 
-    /// Create with default parameters: 2x growth, 0.5x FP tightening
-    pub fn initDefault(allocator: Allocator, initial_capacity: u64, target_fp_rate: f64) !ScalableBloomFilter {
-        return init(allocator, initial_capacity, target_fp_rate, 2, 0.5);
+    pub fn deinit(self: *ScalableBloomFilter, allocator: Allocator) void {
+        for (self.stages.items) |*s| s.filter.deinit(allocator);
+        self.stages.deinit(allocator);
+        self.* = undefined;
     }
 
-    pub fn deinit(self: *ScalableBloomFilter) void {
-        for (self.filters.items) |*filter| {
-            filter.deinit(self.allocator);
+    /// Insert an item. Returns false if the item was already reported as
+    /// present (it is then not inserted again). Allocates when a new stage
+    /// is needed.
+    pub fn add(self: *ScalableBloomFilter, allocator: Allocator, item: []const u8) InitError!bool {
+        return self.addHash(allocator, hashing.hashBytes(item));
+    }
+
+    pub fn addHash(self: *ScalableBloomFilter, allocator: Allocator, h: u64) InitError!bool {
+        if (self.containsHash(h)) return false;
+        var last = &self.stages.items[self.stages.items.len - 1];
+        if (last.count >= last.capacity) {
+            try self.addStage(allocator);
+            last = &self.stages.items[self.stages.items.len - 1];
         }
-        self.filters.deinit(self.allocator);
+        last.filter.addHash(h);
+        last.count += 1;
+        return true;
     }
 
-    /// Set an item in the scalable bloom filter
-    pub fn set(self: *ScalableBloomFilter, item: []const u8) !void {
-        // Check if we need to set a new filter
-        const current_filter = &self.filters.items[self.filters.items.len - 1];
-        const estimated_size = current_filter.estimatedItems();
-        const capacity = self.calculateFilterCapacity(self.filters.items.len - 1);
-
-        if (estimated_size >= @as(f64, @floatFromInt(capacity))) {
-            try self.setNewFilter();
-        }
-
-        // Set in the most recent filter
-        const latest_filter = &self.filters.items[self.filters.items.len - 1];
-        latest_filter.add(item);
-        self.item_count += 1;
+    pub fn contains(self: ScalableBloomFilter, item: []const u8) bool {
+        return self.containsHash(hashing.hashBytes(item));
     }
 
-    /// Check if an item might be in the filter
-    pub fn has(self: *const ScalableBloomFilter, item: []const u8) bool {
-        for (self.filters.items) |*filter| {
-            if (filter.contains(item)) {
-                return true;
-            }
+    pub fn containsHash(self: ScalableBloomFilter, h: u64) bool {
+        // Newest stages hold the most items; check them first.
+        var i = self.stages.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.stages.items[i].filter.containsHash(h)) return true;
         }
         return false;
     }
 
-    /// Get the total estimated number of unique items
-    pub fn estimatedSize(self: *const ScalableBloomFilter) u64 {
-        return self.item_count;
+    /// Number of items inserted (excluding ones skipped as already present).
+    pub fn count(self: ScalableBloomFilter) u64 {
+        var n: u64 = 0;
+        for (self.stages.items) |s| n += s.count;
+        return n;
     }
 
-    /// Get current false positive rate
-    pub fn currentFpRate(self: *const ScalableBloomFilter) f64 {
-        var total_rate: f64 = 0.0;
-        for (self.filters.items, 0..) |_, i| {
-            total_rate += self.calculateFilterFpRate(i);
+    pub fn stageCount(self: ScalableBloomFilter) usize {
+        return self.stages.items.len;
+    }
+
+    /// Upper bound on the current compound false-positive rate:
+    /// Σ P_i over the existing stages. Always below `options.fp_rate`.
+    pub fn fpRateBound(self: ScalableBloomFilter) f64 {
+        var total: f64 = 0;
+        for (0..self.stages.items.len) |i| total += self.stageFpRate(i);
+        return total;
+    }
+
+    /// Drop all stages but the first and empty it.
+    pub fn clear(self: *ScalableBloomFilter, allocator: Allocator) void {
+        for (self.stages.items[1..]) |*s| s.filter.deinit(allocator);
+        self.stages.shrinkRetainingCapacity(1);
+        self.stages.items[0].filter.clear();
+        self.stages.items[0].count = 0;
+    }
+
+    pub fn memoryBytes(self: ScalableBloomFilter) usize {
+        var n: usize = 0;
+        for (self.stages.items) |s| n += s.filter.memoryBytes();
+        return n;
+    }
+
+    fn stageCapacity(self: ScalableBloomFilter, i: usize) u64 {
+        const growth = math.powi(u64, self.options.growth, @intCast(i)) catch return math.maxInt(u64);
+        return math.mul(u64, self.options.initial_capacity, growth) catch math.maxInt(u64);
+    }
+
+    fn stageFpRate(self: ScalableBloomFilter, i: usize) f64 {
+        return self.first_fp_rate * math.pow(f64, self.options.tightening, @floatFromInt(i));
+    }
+
+    fn addStage(self: *ScalableBloomFilter, allocator: Allocator) InitError!void {
+        const i = self.stages.items.len;
+        const capacity = self.stageCapacity(i);
+        var filter = try BloomFilter.init(allocator, .{ .expected_items = capacity, .fp_rate = self.stageFpRate(i) });
+        errdefer filter.deinit(allocator);
+        try self.stages.append(allocator, .{ .filter = filter, .count = 0, .capacity = capacity });
+    }
+
+    /// Body (tag 3): u64 n_0, f64 P, u32 s, f64 r, u32 stage count, then per
+    /// stage: u64 count, u32 k, bit array (§3.1).
+    pub fn serialize(self: ScalableBloomFilter, w: *std.Io.Writer) serde.WriteError!void {
+        try serde.writeHeader(w, .scalable_bloom_filter);
+        try serde.writeInt(w, u64, self.options.initial_capacity);
+        try serde.writeF64(w, self.options.fp_rate);
+        try serde.writeInt(w, u32, self.options.growth);
+        try serde.writeF64(w, self.options.tightening);
+        try serde.writeInt(w, u32, @intCast(self.stages.items.len));
+        for (self.stages.items) |s| {
+            try serde.writeInt(w, u64, s.count);
+            try serde.writeInt(w, u32, s.filter.k);
+            try s.filter.bits.serialize(w);
         }
-        return total_rate;
     }
 
-    /// Get number of filters currently in use
-    pub fn filterCount(self: *const ScalableBloomFilter) usize {
-        return self.filters.items.len;
-    }
+    pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!ScalableBloomFilter {
+        try serde.readHeader(r, .scalable_bloom_filter);
+        const options: Options = .{
+            .initial_capacity = try serde.readInt(r, u64),
+            .fp_rate = try serde.readF64(r),
+            .growth = try serde.readInt(r, u32),
+            .tightening = try serde.readF64(r),
+        };
+        var self = init(allocator, options) catch |err| return toReadError(err);
+        errdefer self.deinit(allocator);
 
-    fn setNewFilter(self: *ScalableBloomFilter) !void {
-        const filter_index = self.filters.items.len;
-        const capacity = self.calculateFilterCapacity(filter_index);
-        const fp_rate = self.calculateFilterFpRate(filter_index);
-
-        const new_filter = try BloomFilter.init(self.allocator, .{ .expected_items = capacity, .fp_rate = fp_rate });
-        try self.filters.append(self.allocator, new_filter);
-    }
-
-    fn calculateFilterCapacity(self: *const ScalableBloomFilter, filter_index: usize) u64 {
-        var capacity = self.initial_capacity;
-        for (0..filter_index) |_| {
-            capacity *= self.growth_factor;
+        const stage_count = try serde.readInt(r, u32);
+        if (stage_count == 0) return error.InvalidData;
+        for (0..stage_count) |i| {
+            if (i > 0) self.addStage(allocator) catch |err| return toReadError(err);
+            const stage = &self.stages.items[i];
+            stage.count = try serde.readInt(r, u64);
+            const k = try serde.readInt(r, u32);
+            var bits = try BitArray.deserialize(allocator, r);
+            defer bits.deinit(allocator);
+            // Stage layout is fully determined by the options; reject anything else.
+            if (k != stage.filter.k or bits.len != stage.filter.bits.len or stage.count > stage.capacity)
+                return error.InvalidData;
+            @memcpy(stage.filter.bits.words, bits.words);
         }
-        return capacity;
-    }
-
-    fn calculateFilterFpRate(self: *const ScalableBloomFilter, filter_index: usize) f64 {
-        var fp_rate = self.target_fp_rate;
-        for (0..filter_index) |_| {
-            fp_rate *= self.fp_tightening_ratio;
-        }
-        return fp_rate;
+        return self;
     }
 };
 
+fn toReadError(err: ScalableBloomFilter.InitError) serde.ReadError {
+    return switch (err) {
+        error.InvalidParameters => error.InvalidData,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
 const testing = std.testing;
 
-test "init default" {
-    var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 100, 0.01);
-    defer sbf.deinit();
-
-    try testing.expectEqual(@as(usize, 1), sbf.filterCount());
+test "init validates options" {
+    try testing.expectError(error.InvalidParameters, ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 0 }));
+    try testing.expectError(error.InvalidParameters, ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 10, .growth = 1 }));
+    try testing.expectError(error.InvalidParameters, ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 10, .tightening = 1 }));
+    try testing.expectError(error.InvalidParameters, ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 10, .fp_rate = 0 }));
 }
 
-test "init with custom parameters" {
-    var sbf = try ScalableBloomFilter.init(testing.allocator, 50, 0.02, 3, 0.3);
-    defer sbf.deinit();
+test "add and contains" {
+    var sbf = try ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 100 });
+    defer sbf.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 1), sbf.filterCount());
+    try testing.expect(!sbf.contains("apple"));
+    try testing.expect(try sbf.add(testing.allocator, "apple"));
+    try testing.expect(!try sbf.add(testing.allocator, "apple")); // duplicate
+    try testing.expect(sbf.contains("apple"));
+    try testing.expectEqual(@as(u64, 1), sbf.count());
 }
 
-test "set and has" {
-    var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 100, 0.01);
-    defer sbf.deinit();
+test "grows by stages and keeps every item" {
+    var sbf = try ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 100, .fp_rate = 0.01 });
+    defer sbf.deinit(testing.allocator);
 
-    try testing.expectEqual(false, sbf.has("test"));
-    try sbf.set("test");
-    try testing.expect(sbf.has("test"));
+    var buf: [32]u8 = undefined;
+    for (0..10_000) |i| _ = try sbf.add(testing.allocator, try std.fmt.bufPrint(&buf, "item-{d}", .{i}));
+    // 100 + 200 + ... + 6400 = 12700 >= 10000, so 7 stages.
+    try testing.expectEqual(@as(usize, 7), sbf.stageCount());
+    for (0..10_000) |i| try testing.expect(sbf.contains(try std.fmt.bufPrint(&buf, "item-{d}", .{i})));
+    try testing.expect(sbf.fpRateBound() < 0.01);
 }
 
-test "multiple items" {
-    var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 100, 0.01);
-    defer sbf.deinit();
+test "compound false-positive rate stays under the target" {
+    var sbf = try ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 1000, .fp_rate = 0.01 });
+    defer sbf.deinit(testing.allocator);
 
-    try sbf.set("apple");
-    try sbf.set("banana");
-    try sbf.set("cherry");
-
-    try testing.expect(sbf.has("apple"));
-    try testing.expect(sbf.has("banana"));
-    try testing.expect(sbf.has("cherry"));
-    try testing.expectEqual(false, sbf.has("grape"));
-}
-
-test "scaling behavior" {
-    var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 5, 0.01);
-    defer sbf.deinit();
-
-    // Set enough items to trigger scaling
-    for (0..20) |i| {
-        var buf: [32]u8 = undefined;
-        const item = try std.fmt.bufPrint(&buf, "item{}", .{i});
-        try sbf.set(item);
+    var buf: [32]u8 = undefined;
+    for (0..50_000) |i| _ = try sbf.add(testing.allocator, try std.fmt.bufPrint(&buf, "item-{d}", .{i}));
+    var fp: usize = 0;
+    for (0..50_000) |i| {
+        if (sbf.contains(try std.fmt.bufPrint(&buf, "absent-{d}", .{i}))) fp += 1;
     }
-
-    // Should have created setitional filters
-    try testing.expect(sbf.filterCount() > 1);
-    try testing.expectEqual(@as(u64, 20), sbf.estimatedSize());
+    try testing.expect(@as(f64, @floatFromInt(fp)) / 50_000 < 0.01);
 }
 
-test "estimated size tracking" {
-    var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 100, 0.01);
-    defer sbf.deinit();
-
-    try testing.expectEqual(@as(u64, 0), sbf.estimatedSize());
-
-    try sbf.set("test2");
-    try testing.expectEqual(@as(u64, 1), sbf.estimatedSize());
-
-    try sbf.set("test2");
-    try testing.expectEqual(@as(u64, 2), sbf.estimatedSize());
+test "clear" {
+    var sbf = try ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 5 });
+    defer sbf.deinit(testing.allocator);
+    var buf: [32]u8 = undefined;
+    for (0..50) |i| _ = try sbf.add(testing.allocator, try std.fmt.bufPrint(&buf, "item-{d}", .{i}));
+    try testing.expect(sbf.stageCount() > 1);
+    sbf.clear(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), sbf.stageCount());
+    try testing.expectEqual(@as(u64, 0), sbf.count());
+    try testing.expect(!sbf.contains("item-0"));
 }
 
-test "false positive rate calculation" {
-    var sbf = try ScalableBloomFilter.initDefault(testing.allocator, 10, 0.01);
-    defer sbf.deinit();
+test "serialize round trip" {
+    var sbf = try ScalableBloomFilter.init(testing.allocator, .{ .initial_capacity = 10 });
+    defer sbf.deinit(testing.allocator);
+    var buf: [32]u8 = undefined;
+    for (0..40) |i| _ = try sbf.add(testing.allocator, try std.fmt.bufPrint(&buf, "item-{d}", .{i}));
 
-    const initial_fp = sbf.currentFpRate();
-    try testing.expectEqual(0.01, initial_fp);
+    const bytes = try serde.toOwnedBytes(testing.allocator, sbf);
+    defer testing.allocator.free(bytes);
+    var r: std.Io.Reader = .fixed(bytes);
+    var back = try ScalableBloomFilter.deserialize(testing.allocator, &r);
+    defer back.deinit(testing.allocator);
 
-    // Set items to trigger scaling
-    for (0..15) |i| {
-        var buf: [32]u8 = undefined;
-        const item = try std.fmt.bufPrint(&buf, "item{}", .{i});
-        try sbf.set(item);
-    }
-
-    // FP rate should still be reasonable
-    const current_fp = sbf.currentFpRate();
-    try testing.expect(current_fp <= 0.02); // Should be close to target
+    try testing.expectEqual(sbf.stageCount(), back.stageCount());
+    try testing.expectEqual(sbf.count(), back.count());
+    for (0..40) |i| try testing.expect(back.contains(try std.fmt.bufPrint(&buf, "item-{d}", .{i})));
 }

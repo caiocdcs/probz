@@ -6,4 +6,5 @@ pub const entries = [_]Entry{
     .{ .name = "hash", .json = @embedFile("vectors/hash.json") },
     .{ .name = "bloom_filter", .json = @embedFile("vectors/bloom_filter.json") },
     .{ .name = "counting_bloom_filter", .json = @embedFile("vectors/counting_bloom_filter.json") },
+    .{ .name = "scalable_bloom_filter", .json = @embedFile("vectors/scalable_bloom_filter.json") },
 };
