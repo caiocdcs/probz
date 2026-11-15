@@ -27,6 +27,7 @@ pub const cases = [_]Case{
     .{ .name = "counting_bloom_filter", .generate = genCountingBloom },
     .{ .name = "scalable_bloom_filter", .generate = genScalableBloom },
     .{ .name = "cuckoo_filter", .generate = genCuckoo },
+    .{ .name = "quotient_filter", .generate = genQuotient },
     .{ .name = "splitmix64", .generate = genSplitMix },
 };
 
@@ -202,6 +203,38 @@ fn genCuckoo(arena: Allocator) anyerror![]const u8 {
         .count_after_remove = cf.count(),
         .contains_after_remove = present,
         .serialized_after_remove = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cf)),
+    });
+}
+
+fn genQuotient(arena: Allocator) anyerror![]const u8 {
+    // q = 5 (32 slots), r = 4: dense enough for long runs and wraparound.
+    const QF = probz.QuotientFilter(4);
+    var qf = try QF.init(arena, .{ .q = 5 });
+    const items = try inputs(arena, 60);
+    const added = try arena.alloc(bool, 28);
+    for (items[0..28], added) |item, *a| a.* = try qf.add(item);
+    const after_add = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, qf));
+    for (items[0..28], 0..) |item, i| {
+        if (i % 3 == 0) _ = qf.remove(item);
+    }
+
+    const Fp = struct { quotient: u64, remainder: u8 };
+    var stored: std.ArrayList(Fp) = .empty;
+    var it = qf.iterator();
+    while (it.next()) |e| try stored.append(arena, .{ .quotient = e.quotient, .remainder = e.remainder });
+
+    const present = try arena.alloc(bool, items.len);
+    for (items, present) |item, *p| p.* = qf.contains(item);
+
+    return toJson(arena, .{
+        .description = "Quotient filter (SPEC.md §5.5): q=5, r=4; add item-0..item-27 (added = newly inserted); serialize; remove item-i for i < 28 with i mod 3 == 0; iterate; query item-0..item-59",
+        .params = .{ .q = 5, .r = 4 },
+        .added = added,
+        .serialized_after_add = after_add,
+        .count_after_remove = qf.count(),
+        .entries_after_remove = stored.items,
+        .contains_after_remove = present,
+        .serialized_after_remove = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, qf)),
     });
 }
 

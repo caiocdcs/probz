@@ -3,6 +3,7 @@ pub const CountingBloomFilter = counting_bloom_filter.CountingBloomFilter;
 pub const DefaultCountingBloomFilter = counting_bloom_filter.DefaultCountingBloomFilter;
 pub const ScalableBloomFilter = scalable_bloom_filter.ScalableBloomFilter;
 pub const QuotientFilter = quotient_filter.QuotientFilter;
+pub const DefaultQuotientFilter = quotient_filter.DefaultQuotientFilter;
 pub const CuckooFilter = cuckoo_filter.CuckooFilter;
 pub const DefaultCuckooFilter = cuckoo_filter.DefaultCuckooFilter;
 

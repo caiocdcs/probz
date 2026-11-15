@@ -1,33 +1,26 @@
 const std = @import("std");
-const QuotientFilter = @import("probz").QuotientFilter;
+const probz = @import("probz");
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create a quotient filter with 8 quotient bits (256 slots) and 8 remainder bits
-    var qf = try QuotientFilter.init(allocator, 8, 8);
-    defer qf.deinit();
+    // 2^10 slots with 8-bit remainders (false positives <= 1/256).
+    var qf = try probz.DefaultQuotientFilter.init(allocator, .{ .q = 10 });
+    defer qf.deinit(allocator);
 
-    // Add some items to the filter
-    try qf.set("apple");
-    try qf.set("banana");
-    try qf.set("cherry");
+    _ = try qf.add("hello");
+    _ = try qf.add("world");
+    std.debug.print("contains 'hello': {}\n", .{qf.contains("hello")});
+    std.debug.print("contains 'zig': {}\n", .{qf.contains("zig")});
 
-    const has_apple = qf.has("apple"); // true
-    const has_banana = qf.has("banana"); // true
-    const has_grape = qf.has("grape"); // false (or possibly true - false positive)
+    _ = qf.remove("hello");
+    std.debug.print("after remove, contains 'hello': {}\n", .{qf.contains("hello")});
 
-    std.debug.print("Has 'apple': {}\n", .{has_apple});
-    std.debug.print("Has 'banana': {}\n", .{has_banana});
-    std.debug.print("Has 'grape': {}\n", .{has_grape});
+    // Fingerprints can be listed in quotient order.
+    var it = qf.iterator();
+    while (it.next()) |e| std.debug.print("stored: quotient={d} remainder={d}\n", .{ e.quotient, e.remainder });
 
-    const deleted_banana = qf.remove("banana"); // true
-    std.debug.print("Deleted 'banana': {}\n", .{deleted_banana});
-
-    const has_banana_after_delete = qf.has("banana"); // false
-    std.debug.print("Has 'banana' after deletion: {}\n", .{has_banana_after_delete});
-
-    std.debug.print("Filter has {} slots\n", .{qf.length});
+    std.debug.print("count: {d}, load: {d:.4}, fp bound: {d:.6}\n", .{ qf.count(), qf.loadFactor(), qf.fpRateBound() });
 }

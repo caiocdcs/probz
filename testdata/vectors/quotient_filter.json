@@ -1,0 +1,176 @@
+{
+  "description": "Quotient filter (SPEC.md §5.5): q=5, r=4; add item-0..item-27 (added = newly inserted); serialize; remove item-i for i < 28 with i mod 3 == 0; iterate; query item-0..item-59",
+  "params": {
+    "q": 5,
+    "r": 4
+  },
+  "added": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "serialized_after_add": "5052425a010505041c0000000000000000070c000000020c0a0e0f02050d030c0e0f04010c010c050e0f09090000070c2000000000000000f66b4dc6000000002000000000000000c0920303000000002000000000000000c0ffff0f00000000",
+  "count_after_remove": 18,
+  "entries_after_remove": [
+    {
+      "quotient": 2,
+      "remainder": 12
+    },
+    {
+      "quotient": 5,
+      "remainder": 2
+    },
+    {
+      "quotient": 5,
+      "remainder": 12
+    },
+    {
+      "quotient": 6,
+      "remainder": 10
+    },
+    {
+      "quotient": 6,
+      "remainder": 14
+    },
+    {
+      "quotient": 7,
+      "remainder": 15
+    },
+    {
+      "quotient": 9,
+      "remainder": 13
+    },
+    {
+      "quotient": 11,
+      "remainder": 3
+    },
+    {
+      "quotient": 11,
+      "remainder": 14
+    },
+    {
+      "quotient": 11,
+      "remainder": 15
+    },
+    {
+      "quotient": 13,
+      "remainder": 4
+    },
+    {
+      "quotient": 14,
+      "remainder": 1
+    },
+    {
+      "quotient": 16,
+      "remainder": 12
+    },
+    {
+      "quotient": 18,
+      "remainder": 1
+    },
+    {
+      "quotient": 22,
+      "remainder": 14
+    },
+    {
+      "quotient": 22,
+      "remainder": 15
+    },
+    {
+      "quotient": 26,
+      "remainder": 9
+    },
+    {
+      "quotient": 30,
+      "remainder": 7
+    }
+  ],
+  "contains_after_remove": [
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    true,
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    true,
+    false,
+    false,
+    true,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "serialized_after_remove": "5052425a01050504120000000000000000000c0000020c0a0e0f0d030e0f04010c00010000000e0f00000900000007002000000000000000e46a454400000000200000000000000040318000000000002000000000000000c0f7800000000000"
+}

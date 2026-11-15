@@ -382,3 +382,91 @@ unsigned value.
   <https://github.com/efficient/cuckoofilter/blob/master/src/cuckoofilter.h>
 
 Vector: `testdata/vectors/cuckoo_filter.json`.
+
+### 5.5 Quotient filter (tag 5)
+
+**Parameters.** q (1–63) and remainder width r (1–32), with q + r ≤ 64.
+There are `S = 2^q` slots. Default r = 8.
+
+**Fingerprint.** With `h = H(item)`: `f_r = h mod 2^r` and
+`f_q = (h >> r) mod 2^q`.
+
+**State.** Per slot i: remainder `R[i]` and bits `occ[i]`
+(is_occupied), `cont[i]` (is_continuation), `shf[i]` (is_shifted). Slot i
+is *empty* iff all three bits are 0. Indexes wrap modulo S. The filter
+stores a set of (f_q, f_r) pairs, and runs are sorted by remainder in
+ascending order.
+
+```
+nextOcc(i): j = i+1; while !occ[j]: j = j+1; return j
+runStart(fq):                  # requires occ[fq]
+  b = fq; while shf[b]: b = b-1
+  s = b
+  while b != fq:
+    s = s+1; while cont[s]: s = s+1
+    b = nextOcc(b)
+  return s
+```
+
+**Contains** (paper Figure 3). If `!occ[fq]`, return false. `s = runStart(fq)`.
+Loop: if `R[s] == fr`, return true. If `R[s] > fr`, return false.
+`s = s+1`. If `!cont[s]`, return false.
+
+**Add.**
+1. If slot fq is empty, set `R[fq] = fr`, `occ[fq] = 1`, count + 1, and
+   return true.
+2. `existed = occ[fq]`. Set `occ[fq] = 1`. `start = runStart(fq)`, and
+   `s = start`.
+3. If existed, scan the run. If `R[s] == fr`, return false (already
+   present). If `R[s] > fr`, stop. Otherwise `s = s+1`, and stop if
+   `!cont[s]`.
+4. If count == S: restore `occ[fq] = existed` and fail with Full.
+5. `head = (s == start)`. If head and existed, set `cont[s] = 1` (the
+   old head becomes a continuation).
+6. Shift right: let e be the first empty slot at or after s. For
+   j = e, e−1, …, s+1: `R[j] = R[j−1]`, `cont[j] = cont[j−1]`, `shf[j] = 1`.
+   `occ` bits do not move.
+7. `R[s] = fr`, `cont[s] = !head`, `shf[s] = (s != fq)`, count + 1, and
+   return true.
+
+**Remove.**
+1. If `!occ[fq]`, return false. `start = runStart(fq)`, and find s with
+   `R[s] == fr` as in Contains. If it is not found, return false.
+2. `wasHead = (s == start)`. If wasHead and `!cont[s+1]`, set `occ[fq] = 0`.
+3. Shift left. Set `cursor = fq`, `hole = s`, `p = s+1`, `first = true`.
+   While `shf[p]`:
+   - `c = cont[p]`.
+   - If first and wasHead and c: `c = 0`, `quot = fq`.
+   - Else if !c: `cursor = nextOcc(cursor)`, `quot = cursor`.
+   - Write `R[hole] = R[p]`, `cont[hole] = c`, `shf[hole] = c OR (quot != hole)`.
+   - `hole = p`, `p = p+1`, `first = false`.
+4. Set `R[hole] = 0`, `cont[hole] = shf[hole] = 0`. Count − 1. Return true.
+
+**Iteration.** Start at the first slot b (from 0) with `!shf[b]`, and set
+`quot = b`. Visit S slots circularly, skipping empty ones. At a slot p
+with `!cont[p]`, set `quot = p` if `!shf[p]`, else `quot = nextOcc(quot)`.
+Yield `(quot, R[p])`.
+
+**Merge.** Requires equal q and r: Add every entry of the other filter.
+
+**False-positive bound.** `1 − (1 − 2^−(q+r))^n ≤ n / 2^(q+r) ≤ 2^−r`.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| q | u8 |
+| r | u8 |
+| count | u64 (must equal the number of non-empty slots) |
+| remainders | S × (ceil(r / 8)-byte little-endian) |
+| occ, cont, shf | 3 × bit array (§3.1), each of length S |
+
+**References.**
+- Michael A. Bender, Martin Farach-Colton, Rob Johnson, Russell Kraner,
+  Bradley C. Kuszmaul, Dzejla Medjedovic, Pablo Montes, Pradeep Shetty,
+  Richard P. Spillane, Erez Zadok, "Don't Thrash: How to Cache Your Hash
+  on Flash", PVLDB 5(11):1627–1637, 2012, §3 and Figure 3.
+  <https://doi.org/10.14778/2350229.2350275> (PDF:
+  <https://vldb.org/pvldb/vol5/p1627_michaelabender_vldb2012.pdf>)
+
+Vector: `testdata/vectors/quotient_filter.json`.
