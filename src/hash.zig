@@ -12,9 +12,10 @@
 //!   https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md
 //! - Adam Kirsch, Michael Mitzenmacher, "Less Hashing, Same Performance:
 //!   Building a Better Bloom Filter", ESA 2006 / Random Structures &
-//!   Algorithms 33(2) 2008. Theorem 5.2 justifies deriving k indexes as
-//!   g_i(x) = h1(x) + i·h2(x) mod m.
-//!   https://www.eecs.harvard.edu/~michaelm/postscripts/rsa2008.pdf
+//!   Algorithms 33(2):187–218, 2008. Theorem 5.2 justifies deriving k
+//!   indexes as g_i(x) = h1(x) + i·h2(x) mod m.
+//!   https://doi.org/10.1002/rsa.20208
+//!   (author PDF: https://www.eecs.harvard.edu/~michaelm/postscripts/rsa2008.pdf)
 
 const std = @import("std");
 

@@ -1,27 +1,33 @@
 const std = @import("std");
-const BloomFilter = @import("probz").BloomFilter;
+const probz = @import("probz");
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create a bloom filter expecting 1000 items with 1% false positive rate
-    var bloom = try BloomFilter.init(allocator, 1000, 0.01);
-    defer bloom.deinit();
+    // Sized for 1000 items at a 1% false-positive rate.
+    var bloom = try probz.BloomFilter.init(allocator, .{ .expected_items = 1000, .fp_rate = 0.01 });
+    defer bloom.deinit(allocator);
 
-    // Add some items to the filter
-    try bloom.set("apple");
-    try bloom.set("banana");
+    bloom.add("apple");
+    bloom.add("banana");
 
-    const has_apple = bloom.has("apple"); // true
-    const has_banana = bloom.has("banana"); // true
-    const has_grape = bloom.has("grape"); // false
+    std.debug.print("bits: {d}, hashes: {d}\n", .{ bloom.bitCount(), bloom.k });
+    std.debug.print("contains 'apple': {}\n", .{bloom.contains("apple")});
+    std.debug.print("contains 'banana': {}\n", .{bloom.contains("banana")});
+    std.debug.print("contains 'grape': {}\n", .{bloom.contains("grape")});
+    std.debug.print("estimated items: {d:.1}\n", .{bloom.estimatedItems()});
 
-    std.debug.print("Has 'apple': {}\n", .{has_apple});
-    std.debug.print("Has 'banana': {}\n", .{has_banana});
-    std.debug.print("Has 'grape': {}\n", .{has_grape});
+    // Hash once, query by hash (useful across several structures).
+    const h = probz.hash.hashBytes("apple");
+    std.debug.print("containsHash(apple): {}\n", .{bloom.containsHash(h)});
 
-    const estimated_size = bloom.estimatedSize();
-    std.debug.print("Estimated items in filter: {}\n", .{estimated_size});
+    // Serialize and load back.
+    const bytes = try probz.serde.toOwnedBytes(allocator, bloom);
+    defer allocator.free(bytes);
+    var reader: std.Io.Reader = .fixed(bytes);
+    var loaded = try probz.BloomFilter.deserialize(allocator, &reader);
+    defer loaded.deinit(allocator);
+    std.debug.print("serialized {d} bytes; loaded contains 'apple': {}\n", .{ bytes.len, loaded.contains("apple") });
 }

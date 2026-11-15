@@ -23,6 +23,7 @@ pub const Case = struct {
 
 pub const cases = [_]Case{
     .{ .name = "hash", .generate = genHash },
+    .{ .name = "bloom_filter", .generate = genBloom },
 };
 
 /// "item-{i}" for i in [0, n).
@@ -81,6 +82,29 @@ fn genHash(arena: Allocator) anyerror![]const u8 {
         .description = "XxHash64(seed=0) of inputs, HashPair derivation (SPEC.md §2)",
         .strings = entries,
         .typed_keys = keys,
+    });
+}
+
+fn genBloom(arena: Allocator) anyerror![]const u8 {
+    const n = 100;
+    var bf = try probz.BloomFilter.init(arena, .{ .expected_items = 1000, .fp_rate = 0.01 });
+    const items = try inputs(arena, 200);
+    for (items[0..n]) |item| bf.add(item);
+
+    // Which of item-0..item-199 the filter reports as present.
+    const present = try arena.alloc(bool, items.len);
+    for (items, present) |item, *p| p.* = bf.contains(item);
+
+    return toJson(arena, .{
+        .description = "Bloom filter (SPEC.md §5.1): init(expected_items=1000, fp_rate=0.01), add item-0..item-99, query item-0..item-199",
+        .params = .{ .expected_items = 1000, .fp_rate = 0.01 },
+        .bit_count = bf.bitCount(),
+        .hash_count = bf.k,
+        .inserted = n,
+        .contains = present,
+        .set_bits = bf.bits.countSet(),
+        .estimated_items = bf.estimatedItems(),
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, bf)),
     });
 }
 

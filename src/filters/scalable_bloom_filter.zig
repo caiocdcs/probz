@@ -30,7 +30,7 @@ pub const ScalableBloomFilter = struct {
         var filters = try ArrayList(BloomFilter).initCapacity(allocator, 1);
 
         // Create initial filter
-        const initial_filter = try BloomFilter.init(allocator, initial_capacity, target_fp_rate);
+        const initial_filter = try BloomFilter.init(allocator, .{ .expected_items = initial_capacity, .fp_rate = target_fp_rate });
         try filters.append(allocator, initial_filter);
 
         return ScalableBloomFilter{
@@ -51,7 +51,7 @@ pub const ScalableBloomFilter = struct {
 
     pub fn deinit(self: *ScalableBloomFilter) void {
         for (self.filters.items) |*filter| {
-            filter.deinit();
+            filter.deinit(self.allocator);
         }
         self.filters.deinit(self.allocator);
     }
@@ -60,23 +60,23 @@ pub const ScalableBloomFilter = struct {
     pub fn set(self: *ScalableBloomFilter, item: []const u8) !void {
         // Check if we need to set a new filter
         const current_filter = &self.filters.items[self.filters.items.len - 1];
-        const estimated_size = current_filter.estimatedSize();
+        const estimated_size = current_filter.estimatedItems();
         const capacity = self.calculateFilterCapacity(self.filters.items.len - 1);
 
-        if (estimated_size >= capacity) {
+        if (estimated_size >= @as(f64, @floatFromInt(capacity))) {
             try self.setNewFilter();
         }
 
         // Set in the most recent filter
         const latest_filter = &self.filters.items[self.filters.items.len - 1];
-        try latest_filter.set(item);
+        latest_filter.add(item);
         self.item_count += 1;
     }
 
     /// Check if an item might be in the filter
     pub fn has(self: *const ScalableBloomFilter, item: []const u8) bool {
         for (self.filters.items) |*filter| {
-            if (filter.has(item)) {
+            if (filter.contains(item)) {
                 return true;
             }
         }
@@ -107,7 +107,7 @@ pub const ScalableBloomFilter = struct {
         const capacity = self.calculateFilterCapacity(filter_index);
         const fp_rate = self.calculateFilterFpRate(filter_index);
 
-        const new_filter = try BloomFilter.init(self.allocator, capacity, fp_rate);
+        const new_filter = try BloomFilter.init(self.allocator, .{ .expected_items = capacity, .fp_rate = fp_rate });
         try self.filters.append(self.allocator, new_filter);
     }
 

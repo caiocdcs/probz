@@ -78,9 +78,11 @@ Compute `h1 + i * h2` with exact (≥ 64-bit) integer arithmetic. For
 
 Reference: Adam Kirsch, Michael Mitzenmacher, "Less Hashing, Same
 Performance: Building a Better Bloom Filter", Random Structures &
-Algorithms 33(2), 2008 (ESA 2006). Theorem 5.2 shows that this scheme
-keeps the asymptotic false-positive rate of k independent hashes.
-<https://www.eecs.harvard.edu/~michaelm/postscripts/rsa2008.pdf>
+Algorithms 33(2):187–218, 2008 (ESA 2006).
+<https://doi.org/10.1002/rsa.20208> (author PDF:
+<https://www.eecs.harvard.edu/~michaelm/postscripts/rsa2008.pdf>).
+Theorem 5.2 shows that this scheme keeps the asymptotic false-positive
+rate of k independent hashes.
 
 Vector: `testdata/vectors/hash.json`.
 
@@ -150,3 +152,45 @@ positions ≥ `len` in the last word must be zero.
 Each structure section gives its parameters, update/query rules, merge
 rule, wire body, and references. Sections are added as each structure is
 brought to spec.
+
+### 5.1 Bloom filter (tag 1)
+
+**Parameters.** `expected_items` n > 0 and `fp_rate` p in (0, 1), or an
+explicit bit count m and hash count k.
+
+```
+m = ceil(-n · ln(p) / (ln 2)^2)
+k = clamp(round((m / n) · ln 2), 1, 65536)
+```
+
+`round` rounds halves away from zero. Example: n = 1000, p = 0.01 gives
+m = 9586, k = 7.
+
+**Add / contains.** With `h = H(item)`, the positions are `g_0 … g_{k-1}`
+from §2.2 with modulus m. `add` sets all k bits. `contains` returns true
+iff all k bits are set.
+
+**Estimated items.** With X set bits: `n* = -(m / k) · ln(1 - X / m)`,
+or +∞ if X = m.
+
+**Merge.** Requires equal m and k: bitwise OR (set union).
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| k | u32 |
+| bits | bit array (§3.1), `len` = m |
+
+**References.**
+- Burton H. Bloom, "Space/Time Trade-offs in Hash Coding with Allowable
+  Errors", CACM 13(7):422–426, 1970. <https://doi.org/10.1145/362686.362692>
+- Andrei Broder, Michael Mitzenmacher, "Network Applications of Bloom
+  Filters: A Survey", Internet Mathematics 1(4):485–509, 2004, §2.1.
+  <https://doi.org/10.1080/15427951.2004.10129096>
+- S. Joshua Swamidass, Pierre Baldi, "Mathematical Correction for
+  Fingerprint Similarity Measures to Improve Chemical Retrieval",
+  J. Chem. Inf. Model. 47(3):952–964, 2007 (item-count estimate).
+  <https://doi.org/10.1021/ci600526a>
+
+Vector: `testdata/vectors/bloom_filter.json`.
