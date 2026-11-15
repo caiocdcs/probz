@@ -1,66 +1,63 @@
-//! Top K tracker for finding the most frequent items from frequency estimation data structures.
+//! Rank candidate items by the counts of any frequency estimator (for
+//! example `CountMinSketch`, or `SpaceSaving`). Use this when the set of
+//! candidates is known; for a stream with unknown heavy hitters, use
+//! `SpaceSaving` directly.
+//!
+//! The estimator type must provide `fn count(self, item: []const u8) u64`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub const TopKError = error{
-    InvalidK,
-    OutOfMemory,
-};
+pub const TopKError = error{ InvalidK, OutOfMemory };
 
-/// Result item for Top K queries.
+/// Result item for top-k queries. `item` is an owned copy.
 pub const TopKItem = struct {
     item: []const u8,
     frequency: u64,
 
+    /// Frequency descending, then item bytes ascending (deterministic).
     pub fn lessThan(_: void, a: TopKItem, b: TopKItem) bool {
-        return a.frequency > b.frequency;
+        if (a.frequency != b.frequency) return a.frequency > b.frequency;
+        return std.mem.order(u8, a.item, b.item) == .lt;
     }
 };
 
 pub fn TopKTracker(comptime FrequencyEstimator: type) type {
     return struct {
-        const Self = @This();
+        /// The k candidates with the highest estimated counts, sorted by
+        /// `TopKItem.lessThan`. Duplicate candidates are counted once.
+        /// Free the result with `freeTopK`.
+        pub fn topK(estimator: *const FrequencyEstimator, allocator: Allocator, candidates: []const []const u8, k: usize) TopKError![]TopKItem {
+            if (k == 0) return error.InvalidK;
 
-        /// Find the top K most frequent items from candidates.
-        /// Returns items sorted by frequency in descending order.
-        pub fn topK(estimator: *const FrequencyEstimator, allocator: Allocator, candidates: []const []const u8, k: usize) ![]TopKItem {
-            if (k == 0) return TopKError.InvalidK;
-            if (candidates.len == 0) return try allocator.alloc(TopKItem, 0);
-
-            var items = try allocator.alloc(TopKItem, candidates.len);
-            defer allocator.free(items);
-
-            for (candidates, 0..) |candidate, i| {
-                const freq = estimator.count(candidate);
-
-                const owned_item = try allocator.dupe(u8, candidate);
-                items[i] = TopKItem{
-                    .item = owned_item,
-                    .frequency = freq,
-                };
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(allocator);
+            var ranked: std.ArrayList(TopKItem) = .empty;
+            defer ranked.deinit(allocator);
+            for (candidates) |candidate| {
+                const gop = try seen.getOrPut(allocator, candidate);
+                if (gop.found_existing) continue;
+                // Borrowed for now; only the returned items are copied.
+                try ranked.append(allocator, .{ .item = candidate, .frequency = estimator.count(candidate) });
             }
+            std.mem.sort(TopKItem, ranked.items, {}, TopKItem.lessThan);
 
-            std.mem.sort(TopKItem, items, {}, TopKItem.lessThan);
-
-            const result_len = @min(k, items.len);
-            const result = try allocator.alloc(TopKItem, result_len);
-
-            for (result, 0..) |*dst, i| {
-                dst.* = items[i];
+            const n = @min(k, ranked.items.len);
+            const result = try allocator.alloc(TopKItem, n);
+            var copied: usize = 0;
+            errdefer {
+                for (result[0..copied]) |r| allocator.free(r.item);
+                allocator.free(result);
             }
-
-            for (items[result_len..]) |item| {
-                allocator.free(item.item);
+            for (result, ranked.items[0..n]) |*dst, src| {
+                dst.* = .{ .item = try allocator.dupe(u8, src.item), .frequency = src.frequency };
+                copied += 1;
             }
-
             return result;
         }
 
         pub fn freeTopK(allocator: Allocator, items: []TopKItem) void {
-            for (items) |item| {
-                allocator.free(item.item);
-            }
+            for (items) |item| allocator.free(item.item);
             allocator.free(items);
         }
     };
@@ -204,4 +201,27 @@ test "TopKTracker with zero frequencies" {
     try testing.expectEqual(@as(u64, 42), top2[0].frequency);
 
     try testing.expectEqual(@as(u64, 0), top2[1].frequency);
+}
+
+test "TopKTracker deduplicates and frees on OOM" {
+    const Mock = struct {
+        pub fn count(_: *const @This(), item: []const u8) u64 {
+            return item.len;
+        }
+    };
+    const tracker = TopKTracker(Mock);
+    const candidates = [_][]const u8{ "aaa", "b", "aaa", "cc", "b" };
+    const top = try tracker.topK(&Mock{}, testing.allocator, &candidates, 10);
+    defer tracker.freeTopK(testing.allocator, top);
+    try testing.expectEqual(@as(usize, 3), top.len);
+    try testing.expectEqualStrings("aaa", top[0].item);
+    try testing.expectEqualStrings("cc", top[1].item);
+
+    // Every allocation failure point must leave nothing leaked.
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(a: Allocator) !void {
+            const t = try tracker.topK(&Mock{}, a, &candidates, 2);
+            tracker.freeTopK(a, t);
+        }
+    }.run, .{});
 }

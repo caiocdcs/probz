@@ -562,3 +562,55 @@ every row depends only on the 64-bit item hash.
   <https://doi.org/10.1002/rsa.20208>
 
 Vector: `testdata/vectors/count_min_sketch.json`.
+
+### 5.8 Space-Saving top-k (tag 8)
+
+**Parameters.** Capacity m > 0 (the number of counters).
+
+**State.** Up to m entries (key bytes, count, error, seq), the total N,
+and a global sequence counter `S` (initially 0). Entries are kept in
+*slot order*: slot i is the i-th entry created, and an eviction reuses
+the evicted entry's slot.
+
+**Add(item, w), w > 0.**
+- If item is monitored: `count += w`, `S += 1`, `seq = S`.
+- Else if fewer than m entries: `S += 1`, then append
+  `(item, count = w, error = 0, seq = S)`.
+- Else evict the entry with the smallest `(count, seq)`. Its slot becomes
+  `(item, count = min + w, error = min, seq = S + 1)` where `min` is the
+  evicted count, and `S += 1`.
+- Then `N += w`.
+
+**Count(item).** The entry's count if monitored. Otherwise the minimum
+count once m entries exist, else 0. This is an upper bound on the true
+count.
+
+**Top-k.** Entries sorted by count descending, then key bytes ascending,
+truncated to k. `count − error` is a lower bound on the true count.
+
+**Guarantees** (paper Lemmas 1–3): Σ count = N, min ≤ N/m, and for every
+monitored item true ≤ count ≤ true + error with error ≤ min.
+
+**Merge.** Not supported.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| m | u32 |
+| N | u64 |
+| S | u64 |
+| entry count n | u32 (≤ m) |
+| n × entry, in slot order | bytes key, u64 count, u64 error, u64 seq |
+
+Readers reject `error > count`, `seq > S`, duplicate keys, and
+`Σ count ≠ N`.
+
+**References.**
+- Ahmed Metwally, Divyakant Agrawal, Amr El Abbadi, "Efficient
+  Computation of Frequent and Top-k Elements in Data Streams", ICDT 2005,
+  LNCS 3363, pp. 398–412, §3–4.
+  <https://doi.org/10.1007/978-3-540-30570-5_27> (technical report:
+  <https://www.cs.ucsb.edu/sites/default/files/documents/2005-23.pdf>)
+
+Vector: `testdata/vectors/space_saving.json`.

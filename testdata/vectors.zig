@@ -11,5 +11,6 @@ pub const entries = [_]Entry{
     .{ .name = "quotient_filter", .json = @embedFile("vectors/quotient_filter.json") },
     .{ .name = "hyperloglog", .json = @embedFile("vectors/hyperloglog.json") },
     .{ .name = "count_min_sketch", .json = @embedFile("vectors/count_min_sketch.json") },
+    .{ .name = "space_saving", .json = @embedFile("vectors/space_saving.json") },
     .{ .name = "splitmix64", .json = @embedFile("vectors/splitmix64.json") },
 };

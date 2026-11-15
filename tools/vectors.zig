@@ -30,6 +30,7 @@ pub const cases = [_]Case{
     .{ .name = "quotient_filter", .generate = genQuotient },
     .{ .name = "hyperloglog", .generate = genHyperLogLog },
     .{ .name = "count_min_sketch", .generate = genCountMin },
+    .{ .name = "space_saving", .generate = genSpaceSaving },
     .{ .name = "splitmix64", .generate = genSplitMix },
 };
 
@@ -281,6 +282,21 @@ fn genCountMin(arena: Allocator) anyerror![]const u8 {
         .total = cms.total,
         .counts = counts,
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cms)),
+    });
+}
+
+fn genSpaceSaving(arena: Allocator) anyerror![]const u8 {
+    var ss = try probz.SpaceSaving.init(arena, .{ .capacity = 8 });
+    const items = try inputs(arena, 20);
+    // Stream: for t in 0..400, add item-(t*t mod 20) with weight (t mod 3) + 1.
+    for (0..400) |t| try ss.add(arena, items[(t * t) % 20], (t % 3) + 1);
+    const top = try ss.topK(arena, 8);
+    return toJson(arena, .{
+        .description = "Space-Saving (SPEC.md §5.8): capacity=8; for t in 0..399 add item-(t*t mod 20) with weight (t mod 3)+1; topK(8)",
+        .params = .{ .capacity = 8 },
+        .total = ss.total,
+        .top = top,
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, ss)),
     });
 }
 
