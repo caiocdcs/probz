@@ -1,38 +1,38 @@
 const std = @import("std");
-const CuckooFilter = @import("probz").CuckooFilter;
-
-// Default cuckoo filter with 16-bit fingerprints and 4 slots per bucket
-const DefaultCuckooFilter = @import("probz").DefaultCuckooFilter;
+const probz = @import("probz");
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create a cuckoo filter with capacity for ~1000 items
-    var cf = try DefaultCuckooFilter.init(allocator, 1000);
-    defer cf.deinit();
+    // 16-bit fingerprints, 4 slots per bucket, room for 1000 items.
+    var cf = try probz.DefaultCuckooFilter.init(allocator, .{ .capacity = 1000 });
+    defer cf.deinit(allocator);
 
-    // Add some items to the filter
-    try cf.set("apple");
-    try cf.set("banana");
-    try cf.set("cherry");
+    try cf.add("apple");
+    try cf.add("banana");
 
-    const has_apple = cf.has("apple"); // true
-    const has_banana = cf.has("banana"); // true
-    const has_grape = cf.has("grape"); // false (or possibly true - false positive)
+    std.debug.print("contains 'apple': {}\n", .{cf.contains("apple")});
+    std.debug.print("contains 'grape': {}\n", .{cf.contains("grape")});
 
-    std.debug.print("Has 'apple': {}\n", .{has_apple});
-    std.debug.print("Has 'banana': {}\n", .{has_banana});
-    std.debug.print("Has 'grape': {}\n", .{has_grape});
+    _ = cf.remove("apple");
+    std.debug.print("after remove, contains 'apple': {}\n", .{cf.contains("apple")});
 
-    // Cuckoo filters support deletion without false negatives
-    const removed_banana = cf.remove("banana"); // true - item was removed
-    std.debug.print("Removed 'banana': {}\n", .{removed_banana});
+    std.debug.print("items: {d}, load: {d:.4}, fp bound: {d:.6}\n", .{
+        cf.count(),
+        cf.loadFactor(),
+        probz.DefaultCuckooFilter.fpRateBound(),
+    });
 
-    const has_banana_after_remove = cf.has("banana"); // false
-    std.debug.print("Has 'banana' after removal: {}\n", .{has_banana_after_remove});
-
-    const item_count = cf.estimatedSize();
-    std.debug.print("Items in filter: {}\n", .{item_count});
+    // add returns error.Full once the table cannot take more items;
+    // items already stored are never lost.
+    var small = try probz.CuckooFilter(u8, 4).init(allocator, .{ .capacity = 64 });
+    defer small.deinit(allocator);
+    var buf: [32]u8 = undefined;
+    var n: usize = 0;
+    while (true) : (n += 1) {
+        small.add(try std.fmt.bufPrint(&buf, "item-{d}", .{n})) catch break;
+    }
+    std.debug.print("small filter took {d} items before reporting Full\n", .{n});
 }

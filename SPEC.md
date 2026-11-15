@@ -86,6 +86,33 @@ rate of k independent hashes.
 
 Vector: `testdata/vectors/hash.json`.
 
+### 2.3 PRNG
+
+Structures that make random choices (cuckoo evictions, MinHash
+coefficients) use SplitMix64 with an explicit 64-bit seed, so results are
+reproducible across languages:
+
+```
+next():
+  state = state + 0x9e3779b97f4a7c15          (mod 2^64)
+  z = state
+  z = (z XOR (z >> 30)) * 0xbf58476d1ce4e5b9  (mod 2^64)
+  z = (z XOR (z >> 27)) * 0x94d049bb133111eb  (mod 2^64)
+  return z XOR (z >> 31)
+
+below(n) = next() mod n
+```
+
+Check values for seed 0: `0xe220a8397b1dcdaf`, `0x6e789e6aa1b965f4`,
+`0x06c45d188009454f`.
+
+Reference: Guy L. Steele, Doug Lea, Christine H. Flood, "Fast Splittable
+Pseudorandom Number Generators", OOPSLA 2014 (ACM SIGPLAN Notices
+49(10):453–472). <https://doi.org/10.1145/2714064.2660195>. The constants
+match Vigna's reference code, <https://prng.di.unimi.it/splitmix64.c>.
+
+Vector: `testdata/vectors/splitmix64.json`.
+
 ---
 
 ## 3. Wire format
@@ -284,3 +311,74 @@ which meet the same per-stage rate at capacity.
   <https://gsd.di.uminho.pt/members/cbm/ps/dbloom.pdf>)
 
 Vector: `testdata/vectors/scalable_bloom_filter.json`.
+
+### 5.4 Cuckoo filter (tag 4)
+
+**Parameters.** Fingerprint width f of 4–32 bits (default 16), bucket size
+b of 1–8 (default 4), bucket count B (a power of two), and a PRNG seed
+(default 0). Sizing from a capacity C:
+`B = nextPow2(max(1, floor(C / b)))`, doubled once if `C / (B · b) > 0.96`.
+
+**Location.** With `h = H(item)`:
+
+```
+fp = (h >> 32) mod 2^f;  if fp == 0 then fp = 1    (0 marks an empty slot)
+i1 = (h mod 2^32) mod B
+alt(i, fp) = (i XOR ((fp * 0x5bd1e995) mod 2^32)) mod B
+i2 = alt(i1, fp)
+```
+
+**State.** B·b slots, a count, an optional victim (bucket, fp), and the
+PRNG (§2.3).
+
+**Insert(i1, i2, fp).** If the victim is occupied, fail with Full (before
+any change). Otherwise increment the count. Put fp in the first empty slot
+of bucket i1, or failing that of i2 (scanning slots from 0). If both are
+full:
+
+```
+bucket = (below(2) == 0) ? i1 : i2
+repeat 500 times:
+  s = below(b); swap fp with slot s of bucket
+  bucket = alt(bucket, fp)
+  if bucket has an empty slot: store fp there (first empty), return
+victim = (bucket, fp)
+```
+
+**Contains.** fp is in bucket i1 or i2, or the victim is (i1 or i2, fp).
+
+**Remove.** Clear the first slot equal to fp in bucket i1, else in i2.
+If that succeeded, decrement the count, and if a victim exists, take it
+out (count − 1) and run Insert(v.bucket, alt(v.bucket, v.fp), v.fp).
+Otherwise, if the victim matches, clear it and decrement the count.
+Otherwise return false.
+
+**False-positive bound.** 2b / 2^f (paper Eq. 5).
+
+**Merge.** Not supported.
+
+**Body.** Each fingerprint is written as a ceil(f / 8)-byte little-endian
+unsigned value.
+
+| Field | Type |
+|---|---|
+| f | u8 |
+| b | u8 |
+| B | u64 |
+| count | u64 (must equal the number of non-empty slots plus the victim) |
+| PRNG state | u64 |
+| victim flag | u8 (0 or 1) |
+| victim bucket | u64 |
+| victim fp | fingerprint |
+| slots | B·b × fingerprint |
+
+**References.**
+- Bin Fan, David G. Andersen, Michael Kaminsky, Michael D. Mitzenmacher,
+  "Cuckoo Filter: Practically Better Than Bloom", CoNEXT 2014, pp. 75–88:
+  §3.1–3.3, Eq. (1), Algorithms 1–2, Eq. (5).
+  <https://doi.org/10.1145/2674005.2674994> (author PDF:
+  <https://www.cs.cmu.edu/~dga/papers/cuckoo-conext2014.pdf>)
+- Reference implementation (victim cache, AltIndex, sizing rule):
+  <https://github.com/efficient/cuckoofilter/blob/master/src/cuckoofilter.h>
+
+Vector: `testdata/vectors/cuckoo_filter.json`.

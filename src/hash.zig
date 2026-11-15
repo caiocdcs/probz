@@ -16,6 +16,11 @@
 //!   indexes as g_i(x) = h1(x) + i·h2(x) mod m.
 //!   https://doi.org/10.1002/rsa.20208
 //!   (author PDF: https://www.eecs.harvard.edu/~michaelm/postscripts/rsa2008.pdf)
+//! - Guy L. Steele, Doug Lea, Christine H. Flood, "Fast Splittable
+//!   Pseudorandom Number Generators", OOPSLA 2014 (ACM SIGPLAN Notices
+//!   49(10):453–472). https://doi.org/10.1145/2714064.2660195
+//!   SplitMix64 constants as in Vigna's reference code:
+//!   https://prng.di.unimi.it/splitmix64.c
 
 const std = @import("std");
 
@@ -79,6 +84,32 @@ pub const HashPair = struct {
     }
 };
 
+/// SplitMix64: the portable PRNG used wherever a structure needs random
+/// choices (cuckoo evictions, MinHash coefficients). It is specified in
+/// SPEC.md §2.3 so ports can reproduce the exact same sequence.
+pub const SplitMix64 = struct {
+    state: u64,
+
+    pub fn init(seed_value: u64) SplitMix64 {
+        return .{ .state = seed_value };
+    }
+
+    pub fn next(self: *SplitMix64) u64 {
+        self.state +%= 0x9e3779b97f4a7c15;
+        var z = self.state;
+        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+        return z ^ (z >> 31);
+    }
+
+    /// Value in [0, n) as `next() mod n`. The modulo bias is negligible
+    /// for the small n used here and keeps ports simple.
+    pub fn below(self: *SplitMix64, n: u64) u64 {
+        std.debug.assert(n > 0);
+        return self.next() % n;
+    }
+};
+
 const testing = std.testing;
 
 test "hashBytes matches the XXH64 reference values" {
@@ -105,4 +136,16 @@ test "HashPair derivation" {
     try testing.expectEqual(@as(u64, 5), p.index(0, 100));
     try testing.expectEqual(@as(u64, 11), p.index(2, 100));
     try testing.expectEqual(@as(u64, 1), p.index(2, 10));
+}
+
+test "SplitMix64 matches std and the reference sequence" {
+    var ours = SplitMix64.init(0);
+    var theirs = std.Random.SplitMix64.init(0);
+    for (0..100) |_| try testing.expectEqual(theirs.next(), ours.next());
+
+    // First outputs for seed 0 (https://prng.di.unimi.it/splitmix64.c).
+    var g = SplitMix64.init(0);
+    try testing.expectEqual(@as(u64, 0xe220a8397b1dcdaf), g.next());
+    try testing.expectEqual(@as(u64, 0x6e789e6aa1b965f4), g.next());
+    try testing.expectEqual(@as(u64, 0x06c45d188009454f), g.next());
 }

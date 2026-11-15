@@ -26,6 +26,8 @@ pub const cases = [_]Case{
     .{ .name = "bloom_filter", .generate = genBloom },
     .{ .name = "counting_bloom_filter", .generate = genCountingBloom },
     .{ .name = "scalable_bloom_filter", .generate = genScalableBloom },
+    .{ .name = "cuckoo_filter", .generate = genCuckoo },
+    .{ .name = "splitmix64", .generate = genSplitMix },
 };
 
 /// "item-{i}" for i in [0, n).
@@ -156,6 +158,50 @@ fn genScalableBloom(arena: Allocator) anyerror![]const u8 {
         .stages = stages,
         .contains = present,
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, sbf)),
+    });
+}
+
+fn genSplitMix(arena: Allocator) anyerror![]const u8 {
+    const seeds = [_]u64{ 0, 1, 0xdeadbeef };
+    const Seq = struct { seed: []const u8, outputs: [8][]const u8 };
+    var seqs: [seeds.len]Seq = undefined;
+    for (seeds, &seqs) |sd, *q| {
+        var g = probz.hash.SplitMix64.init(sd);
+        q.seed = try hex64(arena, sd);
+        for (&q.outputs) |*o| o.* = try hex64(arena, g.next());
+    }
+    return toJson(arena, .{
+        .description = "SplitMix64 outputs (SPEC.md §2.3)",
+        .sequences = seqs,
+    });
+}
+
+fn genCuckoo(arena: Allocator) anyerror![]const u8 {
+    // 8-bit fingerprints, 4 slots, 16 buckets (64 slots): fill until Full so
+    // the vector exercises evictions and the victim cache.
+    const CF = probz.CuckooFilter(u8, 4);
+    var cf = try CF.initBuckets(arena, 16, 0);
+    const items = try inputs(arena, 100);
+    var inserted: usize = 0;
+    for (items) |item| {
+        cf.add(item) catch break;
+        inserted += 1;
+    }
+    const after_fill = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cf));
+    // Remove item-0..item-9.
+    for (items[0..10]) |item| _ = cf.remove(item);
+
+    const present = try arena.alloc(bool, items.len);
+    for (items, present) |item, *p| p.* = cf.contains(item);
+
+    return toJson(arena, .{
+        .description = "Cuckoo filter (SPEC.md §5.4): fingerprint_bits=8, bucket_size=4, bucket_count=16, seed=0; add item-0, item-1, ... until Full; then remove item-0..item-9; query item-0..item-99",
+        .params = .{ .fingerprint_bits = 8, .bucket_size = 4, .bucket_count = 16, .seed = 0 },
+        .inserted_before_full = inserted,
+        .serialized_after_fill = after_fill,
+        .count_after_remove = cf.count(),
+        .contains_after_remove = present,
+        .serialized_after_remove = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cf)),
     });
 }
 

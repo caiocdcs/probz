@@ -1,0 +1,44 @@
+{
+  "description": "SplitMix64 outputs (SPEC.md §2.3)",
+  "sequences": [
+    {
+      "seed": "0x0000000000000000",
+      "outputs": [
+        "0xe220a8397b1dcdaf",
+        "0x6e789e6aa1b965f4",
+        "0x06c45d188009454f",
+        "0xf88bb8a8724c81ec",
+        "0x1b39896a51a8749b",
+        "0x53cb9f0c747ea2ea",
+        "0x2c829abe1f4532e1",
+        "0xc584133ac916ab3c"
+      ]
+    },
+    {
+      "seed": "0x0000000000000001",
+      "outputs": [
+        "0x910a2dec89025cc1",
+        "0xbeeb8da1658eec67",
+        "0xf893a2eefb32555e",
+        "0x71c18690ee42c90b",
+        "0x71bb54d8d101b5b9",
+        "0xc34d0bff90150280",
+        "0xe099ec6cd7363ca5",
+        "0x85e7bb0f12278575"
+      ]
+    },
+    {
+      "seed": "0x00000000deadbeef",
+      "outputs": [
+        "0x4adfb90f68c9eb9b",
+        "0xde586a3141a10922",
+        "0x021fbc2f8e1cfc1d",
+        "0x7466ce737be16790",
+        "0x3bfa8764f685bd1c",
+        "0xab203e503cb55b3f",
+        "0x5a2fdc2bf68cedb3",
+        "0xb30a4ccf430b1b5a"
+      ]
+    }
+  ]
+}
