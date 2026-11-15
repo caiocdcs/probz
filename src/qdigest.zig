@@ -131,36 +131,71 @@ pub const QDigest = struct {
     /// Algorithm 1: from the leaf level up to the root's children, fold a
     /// sibling pair into its parent when count(v) + count(sibling) +
     /// count(parent) ≤ ⌊n/k⌋.
+    ///
+    /// Implemented as one linear pass per level over id-sorted arrays (a
+    /// sibling pair is adjacent; parents are visited in the same order),
+    /// then the map is rebuilt. Doing it in place on the hash map leaves
+    /// so many tombstones that each compress took ~0.2 s at 1.5k nodes.
     pub fn compress(self: *QDigest, allocator: Allocator) Allocator.Error!void {
         const limit = self.total / self.k;
-        // Collect ids by depth, deepest first; parents created on the way
-        // are appended to the next level's list.
-        var levels: [64]std.ArrayList(u64) = @splat(.empty);
+        const b: usize = self.log_universe;
+        var levels: [64]std.ArrayList(Node) = @splat(.empty);
         defer for (&levels) |*l| l.deinit(allocator);
-        var it = self.nodes.keyIterator();
-        while (it.next()) |id| try levels[63 - @clz(id.*)].append(allocator, id.*);
 
-        var depth: usize = self.log_universe;
-        while (depth >= 1) : (depth -= 1) {
-            const ids = levels[depth].items;
-            std.mem.sort(u64, ids, {}, std.sort.asc(u64));
-            for (ids) |id| {
-                // Each pair once, from its left child; skip ids already folded.
-                const left = id & ~@as(u64, 1);
-                if (id != left and self.nodes.contains(left)) continue;
-                const right = left | 1;
-                const parent = left >> 1;
-                const cl = self.nodes.get(left) orelse 0;
-                const cr = self.nodes.get(right) orelse 0;
-                if (cl == 0 and cr == 0) continue;
-                const cp = self.nodes.get(parent) orelse 0;
-                if (cl + cr + cp <= limit) {
-                    _ = self.nodes.remove(left);
-                    _ = self.nodes.remove(right);
-                    if (cp == 0) try levels[depth - 1].append(allocator, parent);
-                    try self.nodes.put(allocator, parent, cp + cl + cr);
-                }
+        var it = self.nodes.iterator();
+        while (it.next()) |e| {
+            try levels[63 - @clz(e.key_ptr.*)].append(allocator, .{ .id = e.key_ptr.*, .count = e.value_ptr.* });
+        }
+        const byId = struct {
+            fn lessThan(_: void, x: Node, y: Node) bool {
+                return x.id < y.id;
             }
+        }.lessThan;
+        for (levels[0 .. b + 1]) |*l| std.mem.sort(Node, l.items, {}, byId);
+
+        var depth = b;
+        while (depth >= 1) : (depth -= 1) {
+            const cur = levels[depth].items;
+            const up = levels[depth - 1].items;
+            var kept: std.ArrayList(Node) = try .initCapacity(allocator, cur.len);
+            errdefer kept.deinit(allocator);
+            var new_up: std.ArrayList(Node) = try .initCapacity(allocator, up.len + cur.len);
+            errdefer new_up.deinit(allocator);
+
+            var ui: usize = 0;
+            var i: usize = 0;
+            while (i < cur.len) {
+                const parent = cur[i].id >> 1;
+                const pair = i + 1 < cur.len and cur[i + 1].id >> 1 == parent;
+                const group = cur[i .. i + @as(usize, if (pair) 2 else 1)];
+                // Copy parents-level nodes that come before this parent.
+                while (ui < up.len and up[ui].id < parent) : (ui += 1) new_up.appendAssumeCapacity(up[ui]);
+                const has_parent = ui < up.len and up[ui].id == parent;
+                const cp = if (has_parent) up[ui].count else 0;
+                var sum: u64 = 0;
+                for (group) |g| sum += g.count;
+                if (sum + cp <= limit) {
+                    new_up.appendAssumeCapacity(.{ .id = parent, .count = cp + sum });
+                    if (has_parent) ui += 1;
+                } else {
+                    kept.appendSliceAssumeCapacity(group);
+                }
+                i += group.len;
+            }
+            new_up.appendSliceAssumeCapacity(up[ui..]);
+
+            levels[depth].deinit(allocator);
+            levels[depth] = kept;
+            levels[depth - 1].deinit(allocator);
+            levels[depth - 1] = new_up;
+        }
+
+        var total_nodes: usize = 0;
+        for (levels[0 .. b + 1]) |l| total_nodes += l.items.len;
+        self.nodes.clearRetainingCapacity(); // also drops tombstones
+        try self.nodes.ensureTotalCapacity(allocator, @intCast(total_nodes));
+        for (levels[0 .. b + 1]) |l| {
+            for (l.items) |node| self.nodes.putAssumeCapacityNoClobber(node.id, node.count);
         }
         try self.scratch.ensureTotalCapacity(allocator, self.nodes.count());
     }
