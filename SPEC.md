@@ -225,7 +225,8 @@ Vector: `testdata/vectors/bloom_filter.json`.
 ### 5.2 Counting Bloom filter (tag 2)
 
 **Parameters.** Same as the Bloom filter (§5.1): m cells and k hashes,
-plus a counter width w of 2–32 bits (default 4).
+plus a counter width w of 2–32 bits (default 4). Counters are bit-packed
+as in the body layout below.
 
 **Add.** Increment the k counters `g_0 … g_{k-1}` (§2.2). A counter at
 `2^w - 1` stays there (saturates).
@@ -249,7 +250,11 @@ false negatives that Fan et al. warn about.
 | w | u8 |
 | k | u32 |
 | m | u64 |
-| counters | m × (ceil(w / 8)-byte little-endian unsigned) |
+| words | ceil(m / P) × u64, where P = floor(64 / w) |
+
+Counter i is bits `[s, s + w)` of word `floor(i / P)`, with
+`s = (i mod P) · w` (LSB = bit 0). Counters never straddle words. All
+other bits (padding, and slots past m) must be zero.
 
 **References.**
 - Li Fan, Pei Cao, Jussara Almeida, Andrei Z. Broder, "Summary Cache: A

@@ -121,7 +121,7 @@ machine, so treat the numbers as indicative only.
 | Structure | add | query | memory |
 |---|--:|--:|--:|
 | BloomFilter (p = 1%) | 15 ns | 8 ns | 1.2 MB |
-| CountingBloomFilter (u4) | 11 ns | 7 ns | 9.6 MB |
+| CountingBloomFilter (u4) | 17 ns | 7 ns | 4.8 MB |
 | ScalableBloomFilter (n₀ = 10k) | 83 ns | 21 ns | 2.5 MB |
 | CuckooFilter (u16, b = 4) | 15 ns | 7 ns | 2.1 MB |
 | QuotientFilter (r = 8, 2²¹ slots) | 7 ns | 6 ns | 2.9 MB |
@@ -131,8 +131,7 @@ machine, so treat the numbers as indicative only.
 | TDigest (δ = 100) | 42 ns | 18 ns | 1 KB |
 | QDigest (σ = 2³², k = 256) | 118 ns | 29 µs | 24 KB |
 
-`CountingBloomFilter` stores each counter in a whole byte, even when it
-is a `u4`.
+`CountingBloomFilter` packs its counters: 16 `u4` counters per 64-bit word.
 
 ## Other languages
 

@@ -44,6 +44,7 @@ The API changed throughout, so expect to update call sites.
 
 ### Added
 - `SpaceSaving`: streaming top-k with per-item error bounds.
+- `CountingBloomFilter` bit-packs its counters (floor(64 / w) per u64 word), halving memory for the default `u4`.
 - `merge` for Bloom, Counting Bloom, Quotient filter, HyperLogLog,
   Count-Min, t-digest, and q-digest. `clear` and `memoryBytes` where
   meaningful.

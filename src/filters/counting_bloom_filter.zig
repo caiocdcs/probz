@@ -12,6 +12,9 @@
 //! counter, so false negatives cannot occur. The cost is that saturated
 //! cells stay set permanently.
 //!
+//! Counters are bit-packed: floor(64 / w) w-bit counters per u64 word,
+//! never straddling a word (16 per word for the default u4).
+//!
 //! `remove` must only be called for items that were added. Removing a
 //! false-positive item decrements counters that belong to other items and
 //! can cause false negatives. This holds for any counting Bloom filter.
@@ -46,11 +49,16 @@ pub fn CountingBloomFilter(comptime Counter: type) type {
     return struct {
         const Self = @This();
         const max = math.maxInt(Counter);
-        /// Bytes per counter on the wire.
-        const wire_bytes = (info.int.bits + 7) / 8;
-        const Wire = std.meta.Int(.unsigned, wire_bytes * 8);
+        const counter_bits = info.int.bits;
+        /// Counters per u64 word; a counter never straddles two words.
+        pub const per_word = 64 / counter_bits;
+        const mask: u64 = max;
 
-        counters: []Counter,
+        /// Packed counters: counter i is bits [s, s + w) of word i / per_word,
+        /// with s = (i mod per_word) · w.
+        words: []u64,
+        /// Number of counters m.
+        cells: u64,
         /// Number of hash functions.
         k: u32,
 
@@ -67,13 +75,13 @@ pub fn CountingBloomFilter(comptime Counter: type) type {
         pub fn initExact(allocator: Allocator, cell_count: u64, hash_count: u32) InitError!Self {
             if (cell_count == 0 or hash_count == 0) return error.InvalidParameters;
             const len = math.cast(usize, cell_count) orelse return error.OutOfMemory;
-            const counters = try allocator.alloc(Counter, len);
-            @memset(counters, 0);
-            return .{ .counters = counters, .k = hash_count };
+            const words = try allocator.alloc(u64, std.math.divCeil(usize, len, per_word) catch unreachable);
+            @memset(words, 0);
+            return .{ .words = words, .cells = cell_count, .k = hash_count };
         }
 
         pub fn deinit(self: *Self, allocator: Allocator) void {
-            allocator.free(self.counters);
+            allocator.free(self.words);
             self.* = undefined;
         }
 
@@ -85,8 +93,9 @@ pub fn CountingBloomFilter(comptime Counter: type) type {
         pub fn addHash(self: *Self, h: u64) void {
             const pair = hashing.HashPair.fromHash(h);
             for (0..self.k) |i| {
-                const c = &self.counters[self.index(pair, i)];
-                if (c.* != max) c.* += 1;
+                const idx = self.index(pair, i);
+                const c = self.get(idx);
+                if (c != max) self.put(idx, c + 1);
             }
         }
 
@@ -107,7 +116,7 @@ pub fn CountingBloomFilter(comptime Counter: type) type {
         pub fn countHash(self: Self, h: u64) Counter {
             const pair = hashing.HashPair.fromHash(h);
             var min: Counter = max;
-            for (0..self.k) |i| min = @min(min, self.counters[self.index(pair, i)]);
+            for (0..self.k) |i| min = @min(min, self.get(self.index(pair, i)));
             return min;
         }
 
@@ -122,8 +131,9 @@ pub fn CountingBloomFilter(comptime Counter: type) type {
             if (!self.containsHash(h)) return false;
             const pair = hashing.HashPair.fromHash(h);
             for (0..self.k) |i| {
-                const c = &self.counters[self.index(pair, i)];
-                if (c.* != max) c.* -= 1;
+                const idx = self.index(pair, i);
+                const c = self.get(idx);
+                if (c != max) self.put(idx, c - 1);
             }
             return true;
         }
@@ -131,7 +141,7 @@ pub fn CountingBloomFilter(comptime Counter: type) type {
         /// Estimated number of distinct items, from the number of non-zero
         /// counters (same estimator as `BloomFilter.estimatedItems`).
         pub fn estimatedItems(self: Self) f64 {
-            const m: f64 = @floatFromInt(self.counters.len);
+            const m: f64 = @floatFromInt(self.cells);
             const k: f64 = @floatFromInt(self.k);
             const x: f64 = @floatFromInt(self.nonZeroCount());
             if (x >= m) return math.inf(f64);
@@ -140,53 +150,71 @@ pub fn CountingBloomFilter(comptime Counter: type) type {
 
         pub fn nonZeroCount(self: Self) usize {
             var n: usize = 0;
-            for (self.counters) |c| n += @intFromBool(c != 0);
+            for (0..self.cells) |i| n += @intFromBool(self.get(i) != 0);
             return n;
         }
 
         /// Multiset union: adds counters (saturating). Both filters must
         /// have the same cell count and hash count.
         pub fn merge(self: *Self, other: Self) MergeError!void {
-            if (self.counters.len != other.counters.len or self.k != other.k) return error.IncompatibleFilters;
-            for (self.counters, other.counters) |*a, b| a.* +|= b;
+            if (self.cells != other.cells or self.k != other.k) return error.IncompatibleFilters;
+            for (0..self.cells) |i| self.put(i, self.get(i) +| other.get(i));
         }
 
         pub fn clear(self: *Self) void {
-            @memset(self.counters, 0);
+            @memset(self.words, 0);
         }
 
         pub fn cellCount(self: Self) u64 {
-            return self.counters.len;
+            return self.cells;
         }
 
         pub fn memoryBytes(self: Self) usize {
-            return self.counters.len * @sizeOf(Counter);
+            return self.words.len * @sizeOf(u64);
         }
 
-        /// Body (tag 2): u8 counter bits, u32 k, u64 m, then m counters, each
-        /// little-endian in ceil(bits / 8) bytes.
+        /// Value of counter `i` (< `cellCount()`).
+        pub fn get(self: Self, i: u64) Counter {
+            const shift: u6 = @intCast((i % per_word) * counter_bits);
+            return @intCast((self.words[@intCast(i / per_word)] >> shift) & mask);
+        }
+
+        fn put(self: *Self, i: u64, v: Counter) void {
+            const shift: u6 = @intCast((i % per_word) * counter_bits);
+            const w = &self.words[@intCast(i / per_word)];
+            w.* = (w.* & ~(mask << shift)) | (@as(u64, v) << shift);
+        }
+
+        /// Body (tag 2): u8 counter bits w, u32 k, u64 m, then
+        /// ceil(m / floor(64 / w)) packed u64 words (layout as in `words`).
         pub fn serialize(self: Self, w: *std.Io.Writer) serde.WriteError!void {
             try serde.writeHeader(w, .counting_bloom_filter);
-            try w.writeByte(info.int.bits);
+            try w.writeByte(counter_bits);
             try serde.writeInt(w, u32, self.k);
-            try serde.writeInt(w, u64, self.counters.len);
-            for (self.counters) |c| try serde.writeInt(w, Wire, c);
+            try serde.writeInt(w, u64, self.cells);
+            try serde.writeIntSlice(w, u64, self.words);
         }
 
         pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!Self {
             try serde.readHeader(r, .counting_bloom_filter);
-            if (try r.takeByte() != info.int.bits) return error.InvalidData;
+            if (try r.takeByte() != counter_bits) return error.InvalidData;
             const k = try serde.readInt(r, u32);
-            const m = math.cast(usize, try serde.readInt(r, u64)) orelse return error.InvalidData;
-            if (k == 0 or m == 0) return error.InvalidData;
-            const counters = try allocator.alloc(Counter, m);
-            errdefer allocator.free(counters);
-            for (counters) |*c| c.* = math.cast(Counter, try serde.readInt(r, Wire)) orelse return error.InvalidData;
-            return .{ .counters = counters, .k = k };
+            const m = try serde.readInt(r, u64);
+            var self = initExact(allocator, m, k) catch |err| return serde.fromInitError(err);
+            errdefer self.deinit(allocator);
+            try serde.readIntSlice(r, u64, self.words);
+            // Bits outside the m counters (per-word padding, and slots past m
+            // in the last word) must be zero.
+            for (self.words, 0..) |word, wi| {
+                const used = @min(per_word, self.cells - wi * per_word);
+                const used_bits = used * counter_bits;
+                if (used_bits < 64 and word >> @intCast(used_bits) != 0) return error.InvalidData;
+            }
+            return self;
         }
 
         inline fn index(self: Self, pair: hashing.HashPair, i: usize) usize {
-            return @intCast(pair.index(@intCast(i), self.counters.len));
+            return pair.index(@intCast(i), self.cells);
         }
     };
 }
@@ -267,8 +295,22 @@ test "merge" {
     try testing.expectError(error.IncompatibleFilters, a.merge(c));
 }
 
+test "packing: neighbouring counters are independent" {
+    var cbf = try CountingBloomFilter(u3).initExact(testing.allocator, 50, 1);
+    defer cbf.deinit(testing.allocator);
+    // 21 three-bit counters per word; exercise both words and the boundary.
+    for (0..50) |i| cbf.put(i, @intCast(i % 8));
+    for (0..50) |i| try testing.expectEqual(@as(u3, @intCast(i % 8)), cbf.get(i));
+    try testing.expectEqual(@as(usize, 3 * 8), cbf.memoryBytes()); // ceil(50 / 21) words
+    // Default u4: half a byte per counter.
+    var d = try DefaultCountingBloomFilter.initExact(testing.allocator, 1600, 3);
+    defer d.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 800), d.memoryBytes());
+}
+
 test "serialize round trip" {
-    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, .{ .expected_items = 50 });
+    // m = 100 is not a multiple of 16, so the last word has padding.
+    var cbf = try DefaultCountingBloomFilter.initExact(testing.allocator, 100, 3);
     defer cbf.deinit(testing.allocator);
     cbf.add("x");
     cbf.add("x");
@@ -278,7 +320,14 @@ test "serialize round trip" {
     var r: std.Io.Reader = .fixed(bytes);
     var back = try DefaultCountingBloomFilter.deserialize(testing.allocator, &r);
     defer back.deinit(testing.allocator);
-    try testing.expectEqualSlices(u4, cbf.counters, back.counters);
+    try testing.expectEqualSlices(u64, cbf.words, back.words);
+
+    // Set padding bits must be rejected (u4: last word holds m mod 16 counters).
+    const bad = try testing.allocator.dupe(u8, bytes);
+    defer testing.allocator.free(bad);
+    bad[bad.len - 1] |= 0x80;
+    r = .fixed(bad);
+    try testing.expectError(error.InvalidData, DefaultCountingBloomFilter.deserialize(testing.allocator, &r));
 
     // A filter with a different counter width must be rejected.
     r = .fixed(bytes);
