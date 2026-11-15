@@ -1,167 +1,179 @@
+//! Fixed-size bit array stored as little-endian `u64` words.
+//!
+//! Bit `i` lives in word `i / 64` at bit position `i % 64` (LSB first).
+//! Bits past `len` in the last word are always zero. This layout is
+//! part of the serialization format (SPEC.md §3.1).
+
 const std = @import("std");
-
 const Allocator = std.mem.Allocator;
-
-const BITS_PER_CELL = 64;
-const CELL_TYPE = u64;
-
-pub const BitArrayError = error{InvalidBit};
+const serde = @import("../serde.zig");
 
 pub const BitArray = struct {
-    allocator: Allocator,
-    cells: []CELL_TYPE,
-    length: u64,
+    words: []u64,
+    /// Number of addressable bits.
+    len: usize,
 
-    /// Initialize new BitArray given allocator and length in bits of BitArray.
-    pub fn init(allocator: Allocator, length: usize) !BitArray {
-        // determine number of bytes of memory needed
-        const num_cells: u64 = if (length % BITS_PER_CELL > 0) (length / BITS_PER_CELL) + 1 else (length / BITS_PER_CELL);
+    pub const empty: BitArray = .{ .words = &.{}, .len = 0 };
 
-        const cells = try allocator.alloc(CELL_TYPE, num_cells);
-        @memset(cells, 0);
-
-        return BitArray{
-            .allocator = allocator,
-            .cells = cells,
-            .length = length,
-        };
+    pub fn wordCount(len: usize) usize {
+        return std.math.divCeil(usize, len, 64) catch unreachable;
     }
 
-    /// Deinitialize and free resources
-    pub fn deinit(self: *BitArray) void {
-        self.allocator.free(self.cells);
+    /// Allocate `len` bits, all zero.
+    pub fn init(allocator: Allocator, len: usize) Allocator.Error!BitArray {
+        const words = try allocator.alloc(u64, wordCount(len));
+        @memset(words, 0);
+        return .{ .words = words, .len = len };
     }
 
-    /// Get value of bit.
-    pub fn get(self: *const BitArray, idx: u64) BitArrayError!u1 {
-        try self.checkIndex(idx);
-        const offset = bitOffset(idx);
-        return @truncate(
-            ((self.cells[cellIdx(idx)] & (@as(CELL_TYPE, 1) << offset))) >> offset,
-        );
+    pub fn deinit(self: *BitArray, allocator: Allocator) void {
+        allocator.free(self.words);
+        self.* = undefined;
     }
 
-    /// Set value of bit to 1.
-    pub fn set(self: *BitArray, idx: u64) BitArrayError!void {
-        try self.checkIndex(idx);
-        const offset = bitOffset(idx);
-        self.cells[cellIdx(idx)] |= (@as(CELL_TYPE, 1) << offset);
+    pub fn clone(self: BitArray, allocator: Allocator) Allocator.Error!BitArray {
+        return .{ .words = try allocator.dupe(u64, self.words), .len = self.len };
     }
 
-    /// Check if bit is set (non-zero).
-    pub fn isSet(self: *const BitArray, idx: u64) BitArrayError!bool {
-        try self.checkIndex(idx);
-        const offset = bitOffset(idx);
-        return (self.cells[cellIdx(idx)] & (@as(CELL_TYPE, 1) << offset)) != 0;
+    pub fn isSet(self: BitArray, idx: usize) bool {
+        std.debug.assert(idx < self.len);
+        return self.words[idx / 64] & mask(idx) != 0;
     }
 
-    /// Clear value of bit to 0.
-    pub fn unset(self: *BitArray, idx: u64) BitArrayError!void {
-        try self.checkIndex(idx);
-        const offset = bitOffset(idx);
-        self.cells[cellIdx(idx)] &= ~(@as(CELL_TYPE, 1) << offset);
+    pub fn set(self: *BitArray, idx: usize) void {
+        std.debug.assert(idx < self.len);
+        self.words[idx / 64] |= mask(idx);
     }
 
-    /// Toggle value of bit.
-    pub fn toggle(self: *BitArray, idx: u64) BitArrayError!void {
-        try self.checkIndex(idx);
-        const offset = bitOffset(idx);
-        self.cells[cellIdx(idx)] ^= @as(CELL_TYPE, 1) << offset;
+    pub fn unset(self: *BitArray, idx: usize) void {
+        std.debug.assert(idx < self.len);
+        self.words[idx / 64] &= ~mask(idx);
     }
 
-    /// Count the number of bits set (1)
-    pub fn count_bits_set(self: *const BitArray) u64 {
-        var total: u64 = 0;
+    pub fn toggle(self: *BitArray, idx: usize) void {
+        std.debug.assert(idx < self.len);
+        self.words[idx / 64] ^= mask(idx);
+    }
 
-        for (self.cells[0 .. self.cells.len - 1]) |cell| {
-            total += @popCount(cell);
-        }
-
-        // This only counts the supposed used bits in the last cell,
-        // it´s just to ensure that no unused bits are counted, even though they are possible zeros
-        if (self.cells.len > 0) {
-            const last_cell = self.cells[self.cells.len - 1];
-            const bits_in_last_cell = self.length % BITS_PER_CELL;
-            if (bits_in_last_cell == 0) {
-                total += @popCount(last_cell);
-            } else {
-                const mask = (@as(u64, 1) << @intCast(bits_in_last_cell)) - 1;
-                total += @popCount(last_cell & mask);
-            }
-        }
-
+    /// Number of bits set to 1.
+    pub fn countSet(self: BitArray) usize {
+        var total: usize = 0;
+        for (self.words) |w| total += @popCount(w);
         return total;
     }
 
-    inline fn checkIndex(self: *const BitArray, idx: u64) BitArrayError!void {
-        if (idx >= self.length) return BitArrayError.InvalidBit;
+    /// Clear every bit.
+    pub fn clear(self: *BitArray) void {
+        @memset(self.words, 0);
+    }
+
+    /// Bitwise OR `other` into `self`. Lengths must match.
+    pub fn unionWith(self: *BitArray, other: BitArray) void {
+        std.debug.assert(self.len == other.len);
+        for (self.words, other.words) |*a, b| a.* |= b;
+    }
+
+    /// Body: u64 bit length, then `wordCount(len)` u64 words.
+    pub fn serialize(self: BitArray, w: *std.Io.Writer) serde.WriteError!void {
+        try serde.writeInt(w, u64, self.len);
+        try serde.writeIntSlice(w, u64, self.words);
+    }
+
+    pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!BitArray {
+        const len = std.math.cast(usize, try serde.readInt(r, u64)) orelse return error.InvalidData;
+        var bits = try init(allocator, len);
+        errdefer bits.deinit(allocator);
+        try serde.readIntSlice(r, u64, bits.words);
+        // Reject set bits beyond `len` so the "tail is zero" invariant holds.
+        if (len % 64 != 0) {
+            const tail = bits.words[bits.words.len - 1] >> @intCast(len % 64);
+            if (tail != 0) return error.InvalidData;
+        }
+        return bits;
+    }
+
+    inline fn mask(idx: usize) u64 {
+        return @as(u64, 1) << @intCast(idx % 64);
     }
 };
 
-inline fn cellIdx(bit_idx: u64) u8 {
-    return @truncate(bit_idx / BITS_PER_CELL);
-}
-
-inline fn bitOffset(bit_idx: u64) u6 {
-    return @truncate(bit_idx % BITS_PER_CELL);
-}
-
 const testing = std.testing;
 
-test "test init" {
-    var bit_array = try BitArray.init(testing.allocator, 10);
-    defer bit_array.deinit();
-}
-
-test "get" {
+test "set, unset, toggle" {
     var bits = try BitArray.init(testing.allocator, 1000);
-    defer bits.deinit();
+    defer bits.deinit(testing.allocator);
 
-    try testing.expectEqual(0, bits.get(200));
+    try testing.expect(!bits.isSet(200));
+    bits.set(200);
+    try testing.expect(bits.isSet(200));
+    bits.unset(200);
+    try testing.expect(!bits.isSet(200));
+    bits.toggle(400);
+    try testing.expect(bits.isSet(400));
 }
 
-test "set" {
-    var bits = try BitArray.init(testing.allocator, 1000);
-    defer bits.deinit();
-
-    try bits.set(200);
-    try testing.expectEqual(1, try bits.get(200));
-}
-
-test "clear" {
-    var bits = try BitArray.init(testing.allocator, 1000);
-    defer bits.deinit();
-
-    try bits.set(400);
-    try bits.unset(400);
-    try testing.expectEqual(0, try bits.get(400));
-}
-
-test "toggle" {
-    var bits = try BitArray.init(testing.allocator, 1000);
-    defer bits.deinit();
-
-    try bits.toggle(400);
-    try testing.expectEqual(1, try bits.get(400));
-}
-
-test "isSet" {
+test "countSet" {
     var bits = try BitArray.init(testing.allocator, 100);
-    defer bits.deinit();
+    defer bits.deinit(testing.allocator);
 
-    try testing.expectEqual(false, try bits.isSet(50));
-    try bits.set(50);
-    try testing.expect(try bits.isSet(50));
+    bits.set(1);
+    bits.set(10);
+    bits.set(28);
+    bits.set(28);
+    bits.set(99);
+    try testing.expectEqual(@as(usize, 4), bits.countSet());
 }
 
-test "count bit set" {
-    var bits = try BitArray.init(testing.allocator, 100);
-    defer bits.deinit();
+test "zero length array" {
+    var bits = try BitArray.init(testing.allocator, 0);
+    defer bits.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), bits.countSet());
+}
 
-    try bits.set(1);
-    try bits.set(10);
-    try bits.set(28);
-    try bits.set(28);
+test "regression: indexes beyond 16384 bits do not alias low words" {
+    // The old implementation truncated the word index to u8, so bit
+    // 64*256 aliased bit 0.
+    var bits = try BitArray.init(testing.allocator, 1 << 20);
+    defer bits.deinit(testing.allocator);
 
-    try testing.expectEqual(3, bits.count_bits_set());
+    bits.set(64 * 256);
+    try testing.expect(!bits.isSet(0));
+    try testing.expect(bits.isSet(64 * 256));
+
+    bits.set((1 << 20) - 1);
+    try testing.expectEqual(@as(usize, 2), bits.countSet());
+}
+
+test "union" {
+    var a = try BitArray.init(testing.allocator, 70);
+    defer a.deinit(testing.allocator);
+    var b = try BitArray.init(testing.allocator, 70);
+    defer b.deinit(testing.allocator);
+    a.set(1);
+    b.set(69);
+    a.unionWith(b);
+    try testing.expect(a.isSet(1) and a.isSet(69));
+}
+
+test "serialize round trip and tail check" {
+    var bits = try BitArray.init(testing.allocator, 70);
+    defer bits.deinit(testing.allocator);
+    bits.set(0);
+    bits.set(69);
+
+    const bytes = try serde.toOwnedBytes(testing.allocator, bits);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqual(@as(usize, 8 + 16), bytes.len);
+
+    var r: std.Io.Reader = .fixed(bytes);
+    var back = try BitArray.deserialize(testing.allocator, &r);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqualSlices(u64, bits.words, back.words);
+
+    // A bit set past `len` must be rejected.
+    const bad = try testing.allocator.dupe(u8, bytes);
+    defer testing.allocator.free(bad);
+    bad[bad.len - 1] = 0x80;
+    r = .fixed(bad);
+    try testing.expectError(error.InvalidData, BitArray.deserialize(testing.allocator, &r));
 }

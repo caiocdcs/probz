@@ -37,6 +37,34 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
+    // Golden vectors (SPEC.md §4): generator module shared by the
+    // gen-vectors tool and the staleness test.
+    const testdata = b.createModule(.{ .root_source_file = b.path("testdata/vectors.zig") });
+    const vectors = b.createModule(.{
+        .root_source_file = b.path("tools/vectors.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "probz", .module = probz },
+            .{ .name = "testdata", .module = testdata },
+        },
+    });
+    const vector_tests = b.addTest(.{ .root_module = vectors });
+    test_step.dependOn(&b.addRunArtifact(vector_tests).step);
+
+    const gen_vectors = b.addExecutable(.{
+        .name = "gen_vectors",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_vectors.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "vectors", .module = vectors }},
+        }),
+    });
+    const run_gen = b.addRunArtifact(gen_vectors);
+    run_gen.addDirectoryArg(b.path("testdata"));
+    b.step("gen-vectors", "Regenerate golden test vectors in testdata/").dependOn(&run_gen.step);
+
     // zig build docs
     const docs_step = b.step("docs", "Generate API documentation into zig-out/docs");
     docs_step.dependOn(&b.addInstallDirectory(.{

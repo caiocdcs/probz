@@ -19,6 +19,7 @@ const HashPair = struct {
 };
 
 pub const BloomFilter = struct {
+    allocator: Allocator,
     /// number of hash functions
     k: u8,
     /// bit array to check for membership
@@ -32,11 +33,11 @@ pub const BloomFilter = struct {
 
         const bit_array = try BitArray.init(allocator, m);
 
-        return BloomFilter{ .k = @truncate(k), .bit_array = bit_array };
+        return BloomFilter{ .allocator = allocator, .k = @truncate(k), .bit_array = bit_array };
     }
 
     pub fn deinit(self: *BloomFilter) void {
-        self.bit_array.deinit();
+        self.bit_array.deinit(self.allocator);
     }
 
     /// Set an object in the Bloom filter.
@@ -45,7 +46,7 @@ pub const BloomFilter = struct {
 
         for (0..self.k) |i| {
             const b = self.calculateBit(&hashes, @truncate(i));
-            try self.bit_array.set(b);
+            self.bit_array.set(b);
         }
     }
 
@@ -58,7 +59,7 @@ pub const BloomFilter = struct {
 
         for (0..self.k) |i| {
             const b = self.calculateBit(&hashes, @truncate(i));
-            const is_set = self.bit_array.isSet(b) catch false;
+            const is_set = self.bit_array.isSet(b);
             if (!is_set) {
                 return false;
             }
@@ -70,9 +71,9 @@ pub const BloomFilter = struct {
     /// This function runs in O(b), e.g., it runs based on the length of the bit_array.
     /// An improvement would be to keep track of all set bits and just return it
     pub fn estimatedSize(self: *const BloomFilter) u64 {
-        const m = @as(f64, @floatFromInt(self.bit_array.length));
+        const m = @as(f64, @floatFromInt(self.bit_array.len));
         const k = @as(f64, @floatFromInt(self.k));
-        const l = @as(f64, @floatFromInt(self.bit_array.count_bits_set()));
+        const l = @as(f64, @floatFromInt(self.bit_array.countSet()));
 
         return @intFromFloat(-(m / k) * math.log(f64, math.e, (1.0 - l / m)));
     }
@@ -81,7 +82,7 @@ pub const BloomFilter = struct {
     /// This reduces hash computations from k to 2 per operation
     pub inline fn calculateBit(self: *const BloomFilter, hash_pair: *const HashPair, i: u32) u64 {
         const combined = @as(u64, hash_pair.hash1) +% (@as(u64, i) *% @as(u64, hash_pair.hash2));
-        return combined % self.bit_array.length;
+        return combined % self.bit_array.len;
     }
 };
 

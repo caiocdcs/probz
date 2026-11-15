@@ -29,7 +29,13 @@ const hyperloglog = @import("hyperloglog.zig");
 const qdigest = @import("qdigest.zig");
 const lsh = @import("lsh.zig");
 
+/// Canonical hashing (XxHash64, double hashing). See SPEC.md §2.
+pub const hash = @import("hash.zig");
+/// Wire-format helpers. See SPEC.md §3.
+pub const serde = @import("serde.zig");
+
 const std = @import("std");
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("filters/bit_array.zig");
 }
