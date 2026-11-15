@@ -65,6 +65,23 @@ pub fn build(b: *std.Build) void {
     run_gen.addDirectoryArg(b.path("testdata"));
     b.step("gen-vectors", "Regenerate golden test vectors in testdata/").dependOn(&run_gen.step);
 
+    // zig build bench: always ReleaseFast, with its own copy of the module.
+    const bench_probz = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "probz", .module = bench_probz }},
+        }),
+    });
+    b.step("bench", "Run benchmarks (ReleaseFast)").dependOn(&b.addRunArtifact(bench).step);
+
     // zig build docs
     const docs_step = b.step("docs", "Generate API documentation into zig-out/docs");
     docs_step.dependOn(&b.addInstallDirectory(.{
