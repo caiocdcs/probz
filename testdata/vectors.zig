@@ -14,5 +14,6 @@ pub const entries = [_]Entry{
     .{ .name = "space_saving", .json = @embedFile("vectors/space_saving.json") },
     .{ .name = "tdigest", .json = @embedFile("vectors/tdigest.json") },
     .{ .name = "qdigest", .json = @embedFile("vectors/qdigest.json") },
+    .{ .name = "minhash_lsh", .json = @embedFile("vectors/minhash_lsh.json") },
     .{ .name = "splitmix64", .json = @embedFile("vectors/splitmix64.json") },
 };

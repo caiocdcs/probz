@@ -740,3 +740,53 @@ equal ids, add the totals, then Compress.
   <https://arxiv.org/abs/cs/0408039>)
 
 Vector: `testdata/vectors/qdigest.json`.
+
+### 5.11 MinHash LSH (tag 11)
+
+**Parameters.** Bands b > 0, rows r > 0, n = b·r hash functions, and a
+seed (default 0). From a threshold t and n: over the divisors b of n
+(ascending), with r = n / b, pick the b minimizing
+`|(1/b)^(1/r) − t|`. Ties go to the larger b.
+
+**Hash functions.** p = 2^61 − 1. Let g be SplitMix64(seed) (§2.3). For
+i = 0 … n−1, in order: `a_i = 1 + g.below(p − 1)`, then `b_i = g.below(p)`.
+For a token, `x = H(token) mod p` and `h_i(x) = (a_i · x + b_i) mod p`,
+computed exactly (128-bit intermediate).
+
+**Signature.** `sig[i] = min over tokens of h_i(x)`. For an empty set,
+every sig[i] = p.
+
+**Band hash.** For band j, XXH64 (seed 0) of the bytes of
+`sig[j·r .. j·r + r − 1]`, each as 8 little-endian bytes.
+
+**Index.** Each band has its own map from band hash to the list of item
+indexes, in insertion order. Item ids are unique byte strings.
+
+**Query.** Collect the items that share the band hash in at least one
+band. Score each by `similarity = (number of i with sig[i] equal) / n`.
+Sort by similarity descending, then id ascending.
+
+**Candidate probability** for Jaccard similarity s: 1 − (1 − s^r)^b.
+
+**Merge.** Not supported. To combine indexes built with the same
+parameters and seed, re-add the items.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| b | u32 |
+| r | u32 |
+| seed | u64 |
+| item count | u32 |
+| items, in insertion order | bytes id, n × u64 signature |
+
+Band maps are rebuilt on load.
+
+**References.**
+- Andrei Z. Broder, "On the Resemblance and Containment of Documents",
+  SEQUENCES 1997, pp. 21–29. <https://doi.org/10.1109/SEQUEN.1997.666900>
+- Jure Leskovec, Anand Rajaraman, Jeffrey D. Ullman, *Mining of Massive
+  Datasets*, Chapter 3 "Finding Similar Items". <http://www.mmds.org/>
+
+Vector: `testdata/vectors/minhash_lsh.json`.

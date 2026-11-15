@@ -33,6 +33,7 @@ pub const cases = [_]Case{
     .{ .name = "space_saving", .generate = genSpaceSaving },
     .{ .name = "tdigest", .generate = genTDigest },
     .{ .name = "qdigest", .generate = genQDigest },
+    .{ .name = "minhash_lsh", .generate = genMinHash },
     .{ .name = "splitmix64", .generate = genSplitMix },
 };
 
@@ -353,6 +354,38 @@ fn genQDigest(arena: Allocator) anyerror![]const u8 {
         .node_count = qd.nodeCount(),
         .quantiles = quantiles,
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, qd)),
+    });
+}
+
+fn genMinHash(arena: Allocator) anyerror![]const u8 {
+    var lsh = try probz.MinHashLSH.init(arena, .{ .bands = 4, .rows = 4, .seed = 7 });
+    const coeffs = try arena.alloc(struct { a: []const u8, b: []const u8 }, 4);
+    for (coeffs, lsh.coeffs[0..4]) |*o, c| o.* = .{ .a = try hex64(arena, c.a), .b = try hex64(arena, c.b) };
+
+    // set-j = tokens item-(10j) .. item-(10j + 29), for j = 0..3.
+    const tokens = try inputs(arena, 60);
+    const Sig = struct { id: []const u8, signature: []const []const u8, band_hashes: []const []const u8 };
+    var sigs: [4]Sig = undefined;
+    for (&sigs, 0..) |*o, j| {
+        const set = tokens[10 * j ..][0..30];
+        const id = try std.fmt.allocPrint(arena, "set-{d}", .{j});
+        try lsh.add(arena, id, set);
+        const sig = try lsh.signature(arena, set);
+        const hex = try arena.alloc([]const u8, sig.len);
+        for (hex, sig) |*h, v| h.* = try hex64(arena, v);
+        const bh = try arena.alloc([]const u8, lsh.bands);
+        for (bh, 0..) |*h, b| h.* = try hex64(arena, lsh.bandHash(sig, @intCast(b)));
+        o.* = .{ .id = id, .signature = hex, .band_hashes = bh };
+    }
+    const results = try lsh.query(arena, tokens[5..35]);
+
+    return toJson(arena, .{
+        .description = "MinHash LSH (SPEC.md §5.11): bands=4, rows=4, seed=7; add set-j = item-(10j)..item-(10j+29) for j=0..3; query item-5..item-34",
+        .params = .{ .bands = 4, .rows = 4, .seed = 7 },
+        .first_coefficients = coeffs,
+        .items = sigs,
+        .query_results = results,
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, lsh)),
     });
 }
 

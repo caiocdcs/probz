@@ -15,8 +15,7 @@ pub const SpaceSaving = space_saving.SpaceSaving;
 pub const TDigest = tdigest.TDigest;
 pub const HyperLogLog = hyperloglog.HyperLogLog;
 pub const QDigest = qdigest.QDigest;
-pub const LSH = lsh.LSH;
-pub const DefaultLSH = lsh.DefaultLSH;
+pub const MinHashLSH = lsh.MinHashLSH;
 pub const Candidate = lsh.Candidate;
 
 const bloom_filter = @import("filters/bloom_filter.zig");
