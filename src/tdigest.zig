@@ -1,457 +1,426 @@
-//! T-digest is a probabilistic data structure for approximate quantile queries
-//! on streaming data. It maintains a compact summary of a data distribution
-//! that allows efficient estimation of quantiles and ranks with excellent
-//! accuracy near the extremes (0th and 100th percentiles).
+//! t-digest (merging variant): quantile and CDF estimates for a stream of
+//! real values, most accurate near the tails. See SPEC.md §5.9.
 //!
-//! The algorithm uses centroids (mean, weight) to represent clusters of points
-//! and employs a scale function to control the size of clusters, making them
-//! smaller near the extremes and larger in the middle of the distribution.
+//! The digest is a sorted list of centroids (mean, weight). New values go
+//! to a buffer; when it fills, buffer and centroids are sorted together and
+//! merged left to right by Algorithm 1 of Dunning & Ertl. A cluster may
+//! absorb the next element while k(q_right) − k(q_left) ≤ 1 (Eq. 4), with
+//! the k₁ scale function (Eq. 3):
+//!
+//!   k₁(q) = δ / (2π) · asin(2q − 1),   k₁⁻¹(k) = (sin(2πk / δ) + 1) / 2
+//!
+//! k₁ makes clusters small near q = 0 and q = 1, which is what gives the
+//! t-digest its accuracy at extreme quantiles. Two consecutive clusters
+//! always span more than 1 in k, and k₁ spans δ/2 in total, so a merge
+//! produces at most ⌈δ⌉ + 2 centroids. probz preallocates that, so `add`,
+//! `quantile` and `cdf` never allocate.
+//!
+//! Interpolation (not fixed by the paper; specified in SPEC.md §5.9):
+//! quantiles are piecewise linear through (0, min), each centroid's
+//! (center of mass, mean), and (N, max). `cdf` is the inverse of that
+//! function.
 //!
 //! # References
 //!
-//! - ["Computing Extremely Accurate Quantiles Using t-Digests", Ted Dunning
-//!   and Otmar Ertl](https://github.com/tdunning/t-digest/blob/main/docs/t-digest-paper/histo.pdf)
-//! - ["The t-digest: Efficient estimates of distributions", Ted Dunning
-//!   (2019)](https://arxiv.org/pdf/1902.04023.pdf)
+//! - Ted Dunning, Otmar Ertl, "Computing Extremely Accurate Quantiles Using
+//!   t-Digests", arXiv:1902.04023, 2019. Eq. 3 (k₁), Eq. 4 (size bound),
+//!   Algorithm 1 (merging). https://arxiv.org/abs/1902.04023
+//! - Reference implementation (MergingDigest): https://github.com/tdunning/t-digest
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList;
 const math = std.math;
+const Allocator = std.mem.Allocator;
 
-pub const TDigestError = error{
-    InvalidCompression,
-    EmptyDigest,
-    InvalidParameters,
-};
-
-/// Centroid representing a cluster of points with mean and weight
-const Centroid = struct {
-    mean: f64,
-    weight: u64,
-
-    fn lessThan(_: void, a: Centroid, b: Centroid) bool {
-        return a.mean < b.mean;
-    }
-};
+const serde = @import("serde.zig");
 
 pub const TDigest = struct {
-    const Self = @This();
-
-    /// Compression parameter (higher = more compression, less accuracy)
     compression: f64,
-    /// List of centroids ordered by mean
-    centroids: ArrayList(Centroid),
-    /// Total number of elements inserted
-    total_weight: u64,
-    /// Maximum number of centroids before compression
-    max_discrete: u32,
-    allocator: Allocator,
+    /// Sorted by (mean, weight), fully merged.
+    centroids: std.ArrayList(Centroid),
+    /// Unmerged points. Also used as scratch space during a merge.
+    buffer: std.ArrayList(Centroid),
+    buffer_limit: usize,
+    max_centroids: usize,
+    /// Total weight N (centroids + buffer).
+    total: u64,
+    min: f64,
+    max: f64,
 
-    const DEFAULT_COMPRESSION: f64 = 100.0;
-    const MIN_COMPRESSION: f64 = 10.0;
-    const MAX_COMPRESSION: f64 = 1000.0;
-    const DEFAULT_MAX_DISCRETE: u32 = 25;
+    pub const Centroid = struct {
+        mean: f64,
+        weight: u64,
 
-    /// Create a new T-digest with specified compression parameter.
-    /// Higher compression provides more accuracy but uses more memory.
-    /// Typical values are between 25 and 1000, with 100 being a good default.
-    pub fn init(allocator: Allocator, compression: f64) !TDigest {
-        if (compression < MIN_COMPRESSION or compression > MAX_COMPRESSION) {
-            return TDigestError.InvalidCompression;
+        fn lessThan(_: void, a: Centroid, b: Centroid) bool {
+            if (a.mean != b.mean) return a.mean < b.mean;
+            return a.weight < b.weight;
         }
+    };
 
-        const centroids = try ArrayList(Centroid).initCapacity(allocator, 0);
+    pub const Options = struct {
+        /// δ in [10, 10000]. Larger is more accurate; at most ⌈δ⌉ + 2
+        /// centroids are kept.
+        compression: f64 = 100,
+    };
 
-        return TDigest{
-            .compression = compression,
+    pub const InitError = error{InvalidParameters} || Allocator.Error;
+    pub const AddError = error{ InvalidValue, Overflow };
+    pub const QueryError = error{ EmptyDigest, InvalidParameters };
+
+    pub fn init(allocator: Allocator, options: Options) InitError!TDigest {
+        const delta = options.compression;
+        if (!(delta >= 10 and delta <= 10_000)) return error.InvalidParameters;
+        const max_centroids: usize = @as(usize, @intFromFloat(@ceil(delta))) + 2;
+        const buffer_limit: usize = 5 * @as(usize, @intFromFloat(@ceil(delta)));
+
+        var centroids = try std.ArrayList(Centroid).initCapacity(allocator, max_centroids);
+        errdefer centroids.deinit(allocator);
+        const buffer = try std.ArrayList(Centroid).initCapacity(allocator, buffer_limit + max_centroids);
+        return .{
+            .compression = delta,
             .centroids = centroids,
-            .total_weight = 0,
-            .max_discrete = DEFAULT_MAX_DISCRETE,
-            .allocator = allocator,
+            .buffer = buffer,
+            .buffer_limit = buffer_limit,
+            .max_centroids = max_centroids,
+            .total = 0,
+            .min = math.inf(f64),
+            .max = -math.inf(f64),
         };
     }
 
-    /// Create a T-digest with default compression (100.0)
-    pub fn initDefault(allocator: Allocator) !TDigest {
-        return try init(allocator, DEFAULT_COMPRESSION);
+    pub fn deinit(self: *TDigest, allocator: Allocator) void {
+        self.centroids.deinit(allocator);
+        self.buffer.deinit(allocator);
+        self.* = undefined;
     }
 
-    pub fn deinit(self: *TDigest) void {
-        self.centroids.deinit(self.allocator);
+    pub fn add(self: *TDigest, value: f64) AddError!void {
+        return self.addWeighted(value, 1);
     }
 
-    /// Add a value to the digest
-    pub fn add(self: *TDigest, value: f64) !void {
-        try self.addWeighted(value, 1);
-    }
-
-    /// Add a value with specified weight to the digest
-    pub fn addWeighted(self: *TDigest, value: f64, weight: u64) !void {
+    /// Add `value` with integer weight. Rejects NaN and infinities.
+    pub fn addWeighted(self: *TDigest, value: f64, weight: u64) AddError!void {
+        if (!math.isFinite(value)) return error.InvalidValue;
         if (weight == 0) return;
-
-        const new_centroid = Centroid{
-            .mean = value,
-            .weight = weight,
-        };
-
-        try self.centroids.append(self.allocator, new_centroid);
-        self.total_weight += weight;
-
-        if (self.centroids.items.len > self.max_discrete) {
-            try self.compress();
-        }
+        self.total = math.add(u64, self.total, weight) catch return error.Overflow;
+        self.min = @min(self.min, value);
+        self.max = @max(self.max, value);
+        self.buffer.appendAssumeCapacity(.{ .mean = value, .weight = weight });
+        if (self.buffer.items.len >= self.buffer_limit) self.flush();
     }
 
-    /// Estimate the quantile at the given percentile (0.0 to 1.0)
-    pub fn quantile(self: *const TDigest, percentile: f64) !f64 {
-        if (self.total_weight == 0) {
-            return TDigestError.EmptyDigest;
-        }
+    /// Merge buffered points into the centroids (Algorithm 1).
+    pub fn flush(self: *TDigest) void {
+        if (self.buffer.items.len == 0) return;
+        self.buffer.appendSliceAssumeCapacity(self.centroids.items);
+        const xs = self.buffer.items;
+        std.mem.sort(Centroid, xs, {}, Centroid.lessThan);
 
-        if (percentile < 0.0 or percentile > 1.0) {
-            return TDigestError.InvalidParameters;
-        }
-
-        if (self.centroids.items.len == 0) {
-            return TDigestError.EmptyDigest;
-        }
-
-        if (self.centroids.items.len == 1) {
-            return self.centroids.items[0].mean;
-        }
-
-        // Ensure centroids are sorted
-        var sorted_centroids = try ArrayList(Centroid).initCapacity(self.allocator, self.centroids.items.len);
-        defer sorted_centroids.deinit(self.allocator);
-
-        for (self.centroids.items) |centroid| {
-            try sorted_centroids.append(self.allocator, centroid);
-        }
-
-        std.mem.sort(Centroid, sorted_centroids.items, {}, Centroid.lessThan);
-
-        const target_weight = percentile * @as(f64, @floatFromInt(self.total_weight));
-
-        if (target_weight <= 0) {
-            return sorted_centroids.items[0].mean;
-        }
-
-        if (target_weight >= @as(f64, @floatFromInt(self.total_weight))) {
-            return sorted_centroids.items[sorted_centroids.items.len - 1].mean;
-        }
-
-        var current_weight: f64 = 0.0;
-
-        for (0..sorted_centroids.items.len - 1) |i| {
-            const centroid = sorted_centroids.items[i];
-            const next_centroid = sorted_centroids.items[i + 1];
-
-            const half_weight = @as(f64, @floatFromInt(centroid.weight)) / 2.0;
-            const next_half_weight = @as(f64, @floatFromInt(next_centroid.weight)) / 2.0;
-
-            if (current_weight + half_weight >= target_weight) {
-                // Target is within the current centroid
-                return centroid.mean;
-            }
-
-            if (current_weight + half_weight + next_half_weight >= target_weight) {
-                // Interpolate between current and next centroid
-                const delta = target_weight - (current_weight + half_weight);
-                const total_gap_weight = next_half_weight;
-                const ratio = if (total_gap_weight > 0) delta / total_gap_weight else 0.0;
-                return centroid.mean + ratio * (next_centroid.mean - centroid.mean);
-            }
-
-            current_weight += @as(f64, @floatFromInt(centroid.weight));
-        }
-
-        return sorted_centroids.items[sorted_centroids.items.len - 1].mean;
-    }
-
-    /// Estimate the cumulative distribution function value at the given value
-    pub fn cdf(self: *const TDigest, value: f64) f64 {
-        if (self.total_weight == 0) {
-            return 0.0;
-        }
-
-        if (self.centroids.items.len == 0) {
-            return 0.0;
-        }
-
-        var sorted_centroids = ArrayList(Centroid).initCapacity(self.allocator, self.centroids.items.len) catch return 0.0;
-        defer sorted_centroids.deinit(self.allocator);
-
-        for (self.centroids.items) |centroid| {
-            sorted_centroids.append(self.allocator, centroid) catch return 0.0;
-        }
-
-        std.mem.sort(Centroid, sorted_centroids.items, {}, Centroid.lessThan);
-
-        if (value < sorted_centroids.items[0].mean) {
-            return 0.0;
-        }
-
-        if (value >= sorted_centroids.items[sorted_centroids.items.len - 1].mean) {
-            return 1.0;
-        }
-
-        var weight_sum: f64 = 0.0;
-
-        for (0..sorted_centroids.items.len) |i| {
-            const centroid = sorted_centroids.items[i];
-
-            if (value < centroid.mean) {
-                // Interpolate within the gap
-                if (i > 0) {
-                    const prev_centroid = sorted_centroids.items[i - 1];
-                    const prev_weight = @as(f64, @floatFromInt(prev_centroid.weight));
-                    const curr_weight = @as(f64, @floatFromInt(centroid.weight));
-
-                    weight_sum += prev_weight / 2.0;
-
-                    const ratio = (value - prev_centroid.mean) / (centroid.mean - prev_centroid.mean);
-                    const interpolated_weight = ratio * (curr_weight / 2.0);
-                    weight_sum += interpolated_weight;
-                }
-                break;
-            } else if (value == centroid.mean) {
-                weight_sum += @as(f64, @floatFromInt(centroid.weight)) / 2.0;
-                break;
+        const n: f64 = @floatFromInt(self.total);
+        self.centroids.clearRetainingCapacity();
+        var q0: f64 = 0;
+        var q_limit = self.kInverse(self.k(q0) + 1);
+        var sigma = xs[0];
+        for (xs[1..]) |x| {
+            const q = q0 + @as(f64, @floatFromInt(sigma.weight + x.weight)) / n;
+            // The second condition only triggers if rounding ever broke the
+            // ⌈δ⌉ + 2 bound; it keeps the preallocated capacity sufficient.
+            if (q <= q_limit or self.centroids.items.len + 1 == self.max_centroids) {
+                sigma = combine(sigma, x);
             } else {
-                weight_sum += @as(f64, @floatFromInt(centroid.weight));
+                self.centroids.appendAssumeCapacity(sigma);
+                q0 += @as(f64, @floatFromInt(sigma.weight)) / n;
+                q_limit = self.kInverse(self.k(q0) + 1);
+                sigma = x;
             }
         }
-
-        return weight_sum / @as(f64, @floatFromInt(self.total_weight));
+        self.centroids.appendAssumeCapacity(sigma);
+        self.buffer.clearRetainingCapacity();
     }
 
-    /// Merge another T-digest into this one
-    pub fn merge(self: *TDigest, other: *const TDigest) !void {
-        for (other.centroids.items) |centroid| {
-            try self.addWeighted(centroid.mean, centroid.weight);
+    /// Weighted mean, computed as m₁ + (m₂ − m₁) · w₂ / (w₁ + w₂).
+    fn combine(a: Centroid, b: Centroid) Centroid {
+        const w = a.weight + b.weight;
+        const ratio = @as(f64, @floatFromInt(b.weight)) / @as(f64, @floatFromInt(w));
+        return .{ .mean = a.mean + (b.mean - a.mean) * ratio, .weight = w };
+    }
+
+    /// k₁(q) = δ / (2π) · asin(2q − 1)
+    fn k(self: TDigest, q: f64) f64 {
+        return self.compression / (2 * math.pi) * math.asin(2 * q - 1);
+    }
+
+    /// k₁⁻¹(k) = (sin(2πk / δ) + 1) / 2, clamped at k ≥ δ/4 to 1.
+    fn kInverse(self: TDigest, kv: f64) f64 {
+        if (kv >= self.compression / 4) return 1;
+        return (@sin(2 * math.pi * kv / self.compression) + 1) / 2;
+    }
+
+    /// Estimated value at quantile q in [0, 1].
+    pub fn quantile(self: *TDigest, q: f64) QueryError!f64 {
+        if (!(q >= 0 and q <= 1)) return error.InvalidParameters;
+        if (self.total == 0) return error.EmptyDigest;
+        self.flush();
+        const n: f64 = @floatFromInt(self.total);
+        const t = q * n;
+        if (t <= 0) return self.min;
+        if (t >= n) return self.max;
+
+        // Walk the knots (0, min), (center_i, mean_i), (N, max).
+        var prev_t: f64 = 0;
+        var prev_v: f64 = self.min;
+        var cum: f64 = 0;
+        for (self.centroids.items) |c| {
+            const w: f64 = @floatFromInt(c.weight);
+            const center = cum + w / 2;
+            if (t <= center) return lerp(prev_t, prev_v, center, c.mean, t);
+            prev_t = center;
+            prev_v = c.mean;
+            cum += w;
         }
+        return lerp(prev_t, prev_v, n, self.max, t);
     }
 
-    /// Get the total number of elements in the digest
-    pub fn size(self: *const TDigest) u64 {
-        return self.total_weight;
-    }
+    /// Estimated fraction of values ≤ x: the inverse of `quantile`'s
+    /// piecewise-linear function. Where that function is flat at x, the
+    /// midpoint of the flat range is returned.
+    pub fn cdf(self: *TDigest, x: f64) QueryError!f64 {
+        if (math.isNan(x)) return error.InvalidParameters;
+        if (self.total == 0) return error.EmptyDigest;
+        self.flush();
+        if (x < self.min) return 0;
+        if (x > self.max) return 1;
+        const n: f64 = @floatFromInt(self.total);
 
-    /// Force compression of the digest
-    pub fn compress(self: *TDigest) !void {
-        if (self.centroids.items.len <= 1) {
-            return;
+        // t_lo = first t with f(t) ≥ x; t_hi = last t with f(t) ≤ x.
+        var t_lo: ?f64 = null;
+        var t_hi: f64 = 0;
+        var it = self.knots();
+        var a = it.next().?;
+        if (a.v >= x) t_lo = a.t;
+        while (it.next()) |b| {
+            if (t_lo == null and b.v >= x) t_lo = if (b.v == a.v) a.t else inverseLerp(a, b, x);
+            if (a.v <= x) t_hi = if (b.v <= x) b.t else inverseLerp(a, b, x);
+            a = b;
         }
+        return ((t_lo orelse n) + t_hi) / 2 / n;
+    }
 
-        // Sort centroids by mean
-        std.mem.sort(Centroid, self.centroids.items, {}, Centroid.lessThan);
+    const Knot = struct { t: f64, v: f64 };
 
-        var compressed = try ArrayList(Centroid).initCapacity(self.allocator, self.centroids.items.len);
+    const KnotIterator = struct {
+        digest: *const TDigest,
+        i: usize = 0,
+        cum: f64 = 0,
+        done: bool = false,
 
-        if (self.centroids.items.len > 0) {
-            var current_centroid = self.centroids.items[0];
-
-            for (1..self.centroids.items.len) |i| {
-                const next_centroid = self.centroids.items[i];
-
-                // Simple merging strategy: merge if centroids are close and weights are small
-                const should_merge = (next_centroid.mean - current_centroid.mean) < (100.0 / self.compression) and
-                    current_centroid.weight + next_centroid.weight < (self.total_weight / @as(u64, @intFromFloat(self.compression / 2)));
-
-                if (should_merge) {
-                    // Merge centroids
-                    const total_weight = current_centroid.weight + next_centroid.weight;
-                    const weighted_mean = (current_centroid.mean * @as(f64, @floatFromInt(current_centroid.weight)) +
-                        next_centroid.mean * @as(f64, @floatFromInt(next_centroid.weight))) /
-                        @as(f64, @floatFromInt(total_weight));
-
-                    current_centroid = Centroid{
-                        .mean = weighted_mean,
-                        .weight = total_weight,
-                    };
-                } else {
-                    // Add current centroid and start new one
-                    try compressed.append(self.allocator, current_centroid);
-                    current_centroid = next_centroid;
-                }
+        fn next(it: *KnotIterator) ?Knot {
+            const d = it.digest;
+            if (it.done) return null;
+            if (it.i == 0 and it.cum == 0) {
+                it.cum = -1; // marker: start knot emitted
+                return .{ .t = 0, .v = d.min };
             }
-
-            // Add the last centroid
-            try compressed.append(self.allocator, current_centroid);
+            if (it.cum < 0) it.cum = 0;
+            if (it.i < d.centroids.items.len) {
+                const c = d.centroids.items[it.i];
+                const w: f64 = @floatFromInt(c.weight);
+                const knot: Knot = .{ .t = it.cum + w / 2, .v = c.mean };
+                it.cum += w;
+                it.i += 1;
+                return knot;
+            }
+            it.done = true;
+            return .{ .t = @floatFromInt(d.total), .v = d.max };
         }
+    };
 
-        // Replace old centroids with compressed ones
-        self.centroids.deinit(self.allocator);
-        self.centroids = compressed;
+    fn knots(self: *const TDigest) KnotIterator {
+        return .{ .digest = self };
     }
 
-    // Private helper functions
-
-    fn getCumulativeWeight(self: *const TDigest, centroids: []const Centroid, additional_weight: u64) u64 {
-        _ = self;
-        var sum: u64 = additional_weight;
-        for (centroids) |centroid| {
-            sum += centroid.weight;
-        }
-        return sum;
+    fn lerp(t0: f64, v0: f64, t1: f64, v1: f64, t: f64) f64 {
+        if (t1 <= t0) return v1;
+        return v0 + (v1 - v0) * ((t - t0) / (t1 - t0));
     }
 
-    fn maxCentroidWeight(self: *const TDigest, cumulative_weight: u64) u64 {
-        if (self.total_weight == 0) return 1;
-        const q = @as(f64, @floatFromInt(cumulative_weight)) / @as(f64, @floatFromInt(self.total_weight));
-        const scale_factor = 4.0 * self.compression * q * (1.0 - q);
-        return @max(1, @as(u64, @intFromFloat(@max(1.0, scale_factor))));
+    fn inverseLerp(a: Knot, b: Knot, x: f64) f64 {
+        if (b.v == a.v) return a.t;
+        return a.t + (b.t - a.t) * ((x - a.v) / (b.v - a.v));
+    }
+
+    /// Add every centroid and buffered point of `other`. The result uses
+    /// this digest's compression.
+    pub fn merge(self: *TDigest, other: TDigest) AddError!void {
+        for (other.centroids.items) |c| try self.addWeighted(c.mean, c.weight);
+        for (other.buffer.items) |c| try self.addWeighted(c.mean, c.weight);
+        // Centroid means lie inside [other.min, other.max]; keep the true extremes.
+        self.min = @min(self.min, other.min);
+        self.max = @max(self.max, other.max);
+    }
+
+    /// Total weight N.
+    pub fn count(self: TDigest) u64 {
+        return self.total;
+    }
+
+    pub fn clear(self: *TDigest) void {
+        self.centroids.clearRetainingCapacity();
+        self.buffer.clearRetainingCapacity();
+        self.total = 0;
+        self.min = math.inf(f64);
+        self.max = -math.inf(f64);
+    }
+
+    /// Body (tag 9): f64 δ, u64 N, f64 min, f64 max, u32 centroid count,
+    /// centroids, u32 buffer count, buffered points; each entry is
+    /// (f64 mean, u64 weight). Empty digests write min = +inf, max = −inf.
+    pub fn serialize(self: TDigest, w: *std.Io.Writer) serde.WriteError!void {
+        try serde.writeHeader(w, .tdigest);
+        try serde.writeF64(w, self.compression);
+        try serde.writeInt(w, u64, self.total);
+        try serde.writeF64(w, self.min);
+        try serde.writeF64(w, self.max);
+        inline for (.{ self.centroids.items, self.buffer.items }) |list| {
+            try serde.writeInt(w, u32, @intCast(list.len));
+            for (list) |c| {
+                try serde.writeF64(w, c.mean);
+                try serde.writeInt(w, u64, c.weight);
+            }
+        }
+    }
+
+    pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!TDigest {
+        try serde.readHeader(r, .tdigest);
+        var self = init(allocator, .{ .compression = try serde.readF64(r) }) catch |err| return serde.fromInitError(err);
+        errdefer self.deinit(allocator);
+        self.total = try serde.readInt(r, u64);
+        self.min = try serde.readF64(r);
+        self.max = try serde.readF64(r);
+        var sum: u64 = 0;
+        inline for (.{ &self.centroids, &self.buffer }, .{ self.max_centroids, self.buffer_limit }) |list, cap| {
+            const n = try serde.readInt(r, u32);
+            if (n > cap) return error.InvalidData;
+            for (0..n) |_| {
+                const c: Centroid = .{ .mean = try serde.readF64(r), .weight = try serde.readInt(r, u64) };
+                if (!math.isFinite(c.mean) or c.weight == 0) return error.InvalidData;
+                sum = math.add(u64, sum, c.weight) catch return error.InvalidData;
+                list.appendAssumeCapacity(c);
+            }
+        }
+        if (sum != self.total) return error.InvalidData;
+        if (!std.sort.isSorted(Centroid, self.centroids.items, {}, Centroid.lessThan)) return error.InvalidData;
+        return self;
     }
 };
 
 const testing = std.testing;
 
-test "init" {
-    var td = try TDigest.init(testing.allocator, 100.0);
-    defer td.deinit();
+test "init validates compression" {
+    try testing.expectError(error.InvalidParameters, TDigest.init(testing.allocator, .{ .compression = 5 }));
+    try testing.expectError(error.InvalidParameters, TDigest.init(testing.allocator, .{ .compression = 20_000 }));
 }
 
-test "init default" {
-    var td = try TDigest.initDefault(testing.allocator);
-    defer td.deinit();
+test "empty and single value" {
+    var td = try TDigest.init(testing.allocator, .{});
+    defer td.deinit(testing.allocator);
+    try testing.expectError(error.EmptyDigest, td.quantile(0.5));
+    try testing.expectError(error.InvalidValue, td.add(math.nan(f64)));
+    try td.add(42);
+    try testing.expectEqual(@as(f64, 42), try td.quantile(0.5));
+    try testing.expectEqual(@as(f64, 42), try td.quantile(0));
+    try testing.expectEqual(@as(f64, 0.5), try td.cdf(42));
+    try testing.expectError(error.InvalidParameters, td.quantile(1.5));
 }
 
-test "invalid compression" {
-    try testing.expectError(TDigestError.InvalidCompression, TDigest.init(testing.allocator, 5.0));
-    try testing.expectError(TDigestError.InvalidCompression, TDigest.init(testing.allocator, 1001.0));
+test "centroid count stays within ceil(delta) + 2" {
+    var td = try TDigest.init(testing.allocator, .{ .compression = 50 });
+    defer td.deinit(testing.allocator);
+    var rng = std.Random.DefaultPrng.init(7);
+    for (0..200_000) |_| try td.add(rng.random().floatNorm(f64));
+    td.flush();
+    try testing.expect(td.centroids.items.len <= 52);
+    try testing.expect(td.centroids.items.len >= 25); // roughly δ/2 or more
 }
 
-test "empty digest quantile" {
-    var td = try TDigest.init(testing.allocator, 100.0);
-    defer td.deinit();
-
-    try testing.expectError(TDigestError.EmptyDigest, td.quantile(0.5));
+/// Rank error |rank(estimate) / n − q| against exact sorted data.
+fn rankError(sorted: []const f64, estimate: f64, q: f64) f64 {
+    const below = std.sort.upperBound(f64, sorted, estimate, struct {
+        fn order(ctx: f64, item: f64) std.math.Order {
+            return std.math.order(ctx, item);
+        }
+    }.order);
+    return @abs(@as(f64, @floatFromInt(below)) / @as(f64, @floatFromInt(sorted.len)) - q);
 }
 
-test "single item" {
-    var td = try TDigest.init(testing.allocator, 100.0);
-    defer td.deinit();
+test "rank error within one k1 unit around q" {
+    // The size bound k(q_right) − k(q_left) ≤ 1 limits every cluster to one
+    // unit of k₁. The estimate for q should land within the q-range of one
+    // k-unit centred on q: [k⁻¹(k(q) − ½), k⁻¹(k(q) + ½)].
+    const n = 100_000;
+    const delta = 100.0;
+    const data = try testing.allocator.alloc(f64, n);
+    defer testing.allocator.free(data);
 
-    try td.add(42.0);
-    try testing.expectEqual(@as(u64, 1), td.size());
+    for (0..3) |dist| {
+        var rng = std.Random.DefaultPrng.init(42);
+        for (data) |*x| x.* = switch (dist) {
+            0 => rng.random().floatExp(f64),
+            1 => rng.random().float(f64),
+            else => rng.random().floatNorm(f64),
+        };
+        var td = try TDigest.init(testing.allocator, .{ .compression = delta });
+        defer td.deinit(testing.allocator);
+        for (data) |x| try td.add(x);
+        std.mem.sort(f64, data, {}, std.sort.asc(f64));
 
-    const q = try td.quantile(0.5);
-    try testing.expectEqual(@as(f64, 42.0), q);
-}
-
-test "add and quantile" {
-    var td = try TDigest.init(testing.allocator, 100.0);
-    defer td.deinit();
-
-    // Add values 1 through 100
-    for (1..101) |i| {
-        try td.add(@as(f64, @floatFromInt(i)));
+        for ([_]f64{ 0.0001, 0.001, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.9999 }) |q| {
+            const kq = td.k(q);
+            const tol = td.kInverse(kq + 0.5) - td.kInverse(@max(kq - 0.5, -delta / 4));
+            const est = try td.quantile(q);
+            try testing.expect(rankError(data, est, q) <= tol);
+            try testing.expect(@abs(try td.cdf(est) - q) <= tol);
+        }
+        try testing.expectEqual(data[0], try td.quantile(0));
+        try testing.expectEqual(data[n - 1], try td.quantile(1));
     }
+}
 
-    try testing.expectEqual(@as(u64, 100), td.size());
-
-    // Test approximate quantiles
-    const median = try td.quantile(0.5);
-    try testing.expect(median >= 45.0 and median <= 55.0); // Should be around 50
-
-    const q25 = try td.quantile(0.25);
-    try testing.expect(q25 >= 20.0 and q25 <= 30.0); // Should be around 25
-
-    const q75 = try td.quantile(0.75);
-    try testing.expect(q75 >= 70.0 and q75 <= 80.0); // Should be around 75
+test "merge matches a single digest" {
+    var a = try TDigest.init(testing.allocator, .{});
+    defer a.deinit(testing.allocator);
+    var b = try TDigest.init(testing.allocator, .{});
+    defer b.deinit(testing.allocator);
+    for (0..10_000) |i| {
+        const x: f64 = @floatFromInt(i);
+        if (i % 2 == 0) try a.add(x) else try b.add(x);
+    }
+    try a.merge(b);
+    try testing.expectEqual(@as(u64, 10_000), a.count());
+    const median = try a.quantile(0.5);
+    try testing.expect(@abs(median - 5000) < 50);
+    try testing.expectEqual(@as(f64, 0), try a.quantile(0));
+    try testing.expectEqual(@as(f64, 9999), try a.quantile(1));
 }
 
 test "weighted values" {
-    var td = try TDigest.init(testing.allocator, 100.0);
-    defer td.deinit();
-
-    try td.addWeighted(10.0, 50);
-    try td.addWeighted(20.0, 50);
-
-    try testing.expectEqual(@as(u64, 100), td.size());
-
-    const median = try td.quantile(0.5);
-    try testing.expect(median >= 10.0 and median <= 20.0); // Should be around 15 but allow wider range
+    var td = try TDigest.init(testing.allocator, .{});
+    defer td.deinit(testing.allocator);
+    try td.addWeighted(10, 50);
+    try td.addWeighted(20, 50);
+    const m = try td.quantile(0.5);
+    try testing.expect(m >= 10 and m <= 20);
+    try testing.expectEqual(@as(u64, 100), td.count());
 }
 
-test "cdf estimation" {
-    var td = try TDigest.init(testing.allocator, 100.0);
-    defer td.deinit();
-
-    for (1..101) |i| {
-        try td.add(@as(f64, @floatFromInt(i)));
-    }
-
-    const cdf50 = td.cdf(50.0);
-    try testing.expect(cdf50 >= 0.4 and cdf50 <= 0.6);
-
-    const cdf25 = td.cdf(25.0);
-    try testing.expect(cdf25 >= 0.1 and cdf25 <= 0.35);
-}
-
-test "merge compatible digests" {
-    var td1 = try TDigest.init(testing.allocator, 50.0);
-    defer td1.deinit();
-
-    var td2 = try TDigest.init(testing.allocator, 75.0);
-    defer td2.deinit();
-
-    try td1.add(10.0);
-    try td1.add(20.0);
-
-    try td2.add(30.0);
-    try td2.add(40.0);
-
-    try td1.merge(&td2);
-    try testing.expectEqual(@as(u64, 4), td1.size());
-}
-
-test "extreme quantiles accuracy" {
-    var td = try TDigest.init(testing.allocator, 100.0);
-    defer td.deinit();
-
-    // Add values with more density at extremes
-    for (0..50) |_| {
-        try td.add(1.0); // Many low values
-    }
-
-    for (1..50) |i| {
-        try td.add(@as(f64, @floatFromInt(i + 1))); // Middle values
-    }
-
-    for (0..50) |_| {
-        try td.add(100.0); // Many high values
-    }
-
-    // Test that extreme quantiles are accurate
-    const q01 = try td.quantile(0.01);
-    try testing.expect(q01 <= 5.0);
-
-    const q99 = try td.quantile(0.99);
-    try testing.expect(q99 >= 95.0);
-}
-
-test "invalid quantile parameters" {
-    var td = try TDigest.init(testing.allocator, 100.0);
-    defer td.deinit();
-
-    try td.add(42.0);
-
-    try testing.expectError(TDigestError.InvalidParameters, td.quantile(-0.1));
-    try testing.expectError(TDigestError.InvalidParameters, td.quantile(1.1));
-}
-
-test "compression behavior" {
-    var td = try TDigest.init(testing.allocator, 20.0); // Low compression for more aggressive merging
-    defer td.deinit();
-
-    // Add many values to trigger compression
-    for (1..1000) |i| {
-        try td.add(@as(f64, @floatFromInt(i)));
-    }
-
-    // After compression, should have fewer centroids than values
-    try testing.expect(td.centroids.items.len < 500);
-    try testing.expectEqual(@as(u64, 999), td.size());
+test "serialize round trip" {
+    var td = try TDigest.init(testing.allocator, .{ .compression = 20 });
+    defer td.deinit(testing.allocator);
+    for (0..1000) |i| try td.add(@floatFromInt(i % 97));
+    try td.add(3.5); // leave something in the buffer
+    const bytes = try serde.toOwnedBytes(testing.allocator, td);
+    defer testing.allocator.free(bytes);
+    var r: std.Io.Reader = .fixed(bytes);
+    var back = try TDigest.deserialize(testing.allocator, &r);
+    defer back.deinit(testing.allocator);
+    for ([_]f64{ 0, 0.1, 0.5, 0.9, 1 }) |q| try testing.expectEqual(try td.quantile(q), try back.quantile(q));
 }

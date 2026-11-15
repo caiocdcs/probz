@@ -31,6 +31,7 @@ pub const cases = [_]Case{
     .{ .name = "hyperloglog", .generate = genHyperLogLog },
     .{ .name = "count_min_sketch", .generate = genCountMin },
     .{ .name = "space_saving", .generate = genSpaceSaving },
+    .{ .name = "tdigest", .generate = genTDigest },
     .{ .name = "splitmix64", .generate = genSplitMix },
 };
 
@@ -297,6 +298,34 @@ fn genSpaceSaving(arena: Allocator) anyerror![]const u8 {
         .total = ss.total,
         .top = top,
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, ss)),
+    });
+}
+
+fn genTDigest(arena: Allocator) anyerror![]const u8 {
+    // Inputs from SplitMix64(seed 1): x_i = (next() >> 11) * 2^-53 * 1000.
+    var td = try probz.TDigest.init(arena, .{ .compression = 20 });
+    var g = probz.hash.SplitMix64.init(1);
+    for (0..2000) |_| try td.add(@as(f64, @floatFromInt(g.next() >> 11)) * 0x1p-53 * 1000);
+    td.flush();
+
+    const qs = [_]f64{ 0, 0.001, 0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99, 0.999, 1 };
+    const Q = struct { q: f64, value: f64 };
+    var quantiles: [qs.len]Q = undefined;
+    for (qs, &quantiles) |q, *out| out.* = .{ .q = q, .value = try td.quantile(q) };
+    const xs = [_]f64{ 0, 1, 10, 100, 250, 500, 750, 900, 990, 1000 };
+    const C = struct { x: f64, cdf: f64 };
+    var cdfs: [xs.len]C = undefined;
+    for (xs, &cdfs) |x, *out| out.* = .{ .x = x, .cdf = try td.cdf(x) };
+
+    return toJson(arena, .{
+        .description = "t-digest (SPEC.md §5.9): compression=20; add 2000 values x = (SplitMix64(seed 1).next() >> 11) * 2^-53 * 1000; flush. Compare floats with relative tolerance 1e-9 (asin/sin may differ by an ulp across libms).",
+        .params = .{ .compression = 20 },
+        .centroids = td.centroids.items,
+        .min = td.min,
+        .max = td.max,
+        .quantiles = quantiles,
+        .cdf = cdfs,
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, td)),
     });
 }
 

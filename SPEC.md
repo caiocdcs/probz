@@ -614,3 +614,76 @@ Readers reject `error > count`, `seq > S`, duplicate keys, and
   <https://www.cs.ucsb.edu/sites/default/files/documents/2005-23.pdf>)
 
 Vector: `testdata/vectors/space_saving.json`.
+
+### 5.9 t-digest (tag 9)
+
+**Parameters.** Compression δ in [10, 10000] (default 100). The buffer
+limit is `B = 5 · ceil(δ)`, and at most `ceil(δ) + 2` centroids are kept.
+
+**State.** Sorted centroids (mean f64, weight u64), a buffer of points,
+the total weight N, min, and max (+∞ / −∞ when empty).
+
+**Add(x, w).** Reject non-finite x. Ignore w = 0. N += w, update
+min/max, append (x, w) to the buffer, and flush when the buffer holds
+B points.
+
+**Scale function** (paper Eq. 3):
+
+```
+k(q)    = δ / (2π) · asin(2q − 1)
+kinv(k) = 1                         if k ≥ δ/4
+        = (sin(2π · k / δ) + 1) / 2 otherwise
+```
+
+**Flush** (paper Algorithm 1). If the buffer is empty, do nothing.
+Otherwise let X be buffer ∪ centroids, sorted by (mean, weight)
+ascending. Then:
+
+```
+q0 = 0; qlimit = kinv(k(q0) + 1); σ = X[0]; out = []
+for x in X[1:]:
+  q = q0 + (σ.w + x.w) / N
+  if q ≤ qlimit or len(out) + 1 == ceil(δ) + 2:
+    σ = (σ.mean + (x.mean − σ.mean) · (x.w / (σ.w + x.w)), σ.w + x.w)
+  else:
+    out.append(σ); q0 = q0 + σ.w / N; qlimit = kinv(k(q0) + 1); σ = x
+out.append(σ); centroids = out; clear the buffer
+```
+
+**Quantile(q), q in [0, 1].** Flush first. With t = q·N: if t ≤ 0 return
+min, and if t ≥ N return max. Otherwise interpolate linearly through the
+knots (0, min), (c_i, mean_i) for each centroid i, and (N, max), where
+`c_i = Σ_{j<i} w_j + w_i / 2`.
+
+**CDF(x).** Flush first. If x < min return 0, and if x > max return 1.
+Otherwise let f be the piecewise-linear function above. With
+`t_lo = inf{t : f(t) ≥ x}` and `t_hi = sup{t : f(t) ≤ x}`, return
+`(t_lo + t_hi) / 2 / N`.
+
+**Merge.** Add every centroid and buffered point of the other digest
+with its weight, then take the min/max of both. The result uses this
+digest's δ.
+
+**Body.** Each entry is f64 mean followed by u64 weight.
+
+| Field | Type |
+|---|---|
+| δ | f64 |
+| N | u64 |
+| min, max | f64, f64 |
+| centroid count | u32 (≤ ceil(δ) + 2) |
+| centroids | entries, sorted |
+| buffer count | u32 (≤ B) |
+| buffer | entries |
+
+**Floating point.** Ports should compare t-digest vector outputs with a
+relative tolerance of 1e-9, because asin/sin results can differ by an
+ulp across math libraries.
+
+**References.**
+- Ted Dunning, Otmar Ertl, "Computing Extremely Accurate Quantiles Using
+  t-Digests", arXiv:1902.04023, 2019: Eq. 3 (k₁), Eq. 4, Algorithm 1.
+  <https://arxiv.org/abs/1902.04023>
+- Reference implementation: <https://github.com/tdunning/t-digest>
+
+Vector: `testdata/vectors/tdigest.json`.
