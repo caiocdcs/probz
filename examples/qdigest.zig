@@ -1,63 +1,32 @@
 const std = @import("std");
-const QDigest = @import("probz").QDigest;
+const probz = @import("probz");
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create a Q-digest with compression factor 50 and universe size 1024
-    var qd = try QDigest.init(allocator, 50, 1024);
-    defer qd.deinit();
+    // Values in [0, 2^16); k = 100 gives rank error <= 16/100 * n, <= 300 nodes.
+    var qd = try probz.QDigest.init(allocator, .{ .log_universe = 16, .k = 100 });
+    defer qd.deinit(allocator);
 
-    // Add some values to the digest
-    try qd.add(10);
-    try qd.add(20);
-    try qd.add(30);
-
-    const size1 = qd.size();
-    std.debug.print("Size after 3 items: {d}\n", .{size1});
-
-    // Add more values (1 to 100)
-    for (1..101) |i| {
-        try qd.add(@intCast(i));
+    // Response sizes in bytes, mostly small with a long tail.
+    var rng = std.Random.DefaultPrng.init(9);
+    for (0..50_000) |_| {
+        const u = rng.random().intRangeLessThan(u64, 0, 256);
+        try qd.add(allocator, u * u);
     }
 
-    const size2 = qd.size();
-    std.debug.print("Size after 103 items: {d}\n", .{size2});
+    std.debug.print("{d} values in {d} nodes (error bound {d:.2})\n", .{ qd.count(), qd.nodeCount(), qd.errorBound() });
+    for ([_]f64{ 0.25, 0.5, 0.9, 0.99 }) |q| {
+        std.debug.print("  q={d}: {d}\n", .{ q, try qd.quantile(q) });
+    }
+    std.debug.print("  values <= 10000 (lower bound): {d}\n", .{qd.rank(10_000)});
 
-    // Test quantile estimation
-    const median = try qd.quantile(0.5);
-    const q25 = try qd.quantile(0.25);
-    const q75 = try qd.quantile(0.75);
-
-    std.debug.print("25th percentile: {d}\n", .{q25});
-    std.debug.print("50th percentile (median): {d}\n", .{median});
-    std.debug.print("75th percentile: {d}\n", .{q75});
-
-    // Test rank estimation
-    const rank_50 = qd.rank(50);
-    const rank_25 = qd.rank(25);
-    const rank_75 = qd.rank(75);
-
-    std.debug.print("Rank of 25: {d:.2}\n", .{rank_25});
-    std.debug.print("Rank of 50: {d:.2}\n", .{rank_50});
-    std.debug.print("Rank of 75: {d:.2}\n", .{rank_75});
-
-    // Demonstrate merging
-    var qd2 = try QDigest.init(allocator, 50, 1024);
-    defer qd2.deinit();
-
-    try qd2.add(200);
-    try qd2.add(300);
-
-    const size_before_merge = qd.size();
-    try qd.merge(&qd2);
-    const size_after_merge = qd.size();
-
-    std.debug.print("Size before merge: {d}\n", .{size_before_merge});
-    std.debug.print("Size after merge: {d}\n", .{size_after_merge});
-
-    const new_median = try qd.quantile(0.5);
-    std.debug.print("Median after merge: {d}\n", .{new_median});
+    // Digests with the same universe and k merge exactly by bucket.
+    var other = try probz.QDigest.init(allocator, .{ .log_universe = 16, .k = 100 });
+    defer other.deinit(allocator);
+    for (0..10_000) |_| try other.add(allocator, 60_000);
+    try qd.merge(allocator, other);
+    std.debug.print("after merge: q=0.99 -> {d}\n", .{try qd.quantile(0.99)});
 }

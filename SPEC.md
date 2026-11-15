@@ -687,3 +687,56 @@ ulp across math libraries.
 - Reference implementation: <https://github.com/tdunning/t-digest>
 
 Vector: `testdata/vectors/tdigest.json`.
+
+### 5.10 q-digest (tag 10)
+
+**Parameters.** Universe σ = 2^b with b in [1, 63], and compression k ≥ 1.
+Values are integers in [0, σ).
+
+**Tree.** Node ids: the root is 1, and node i has children 2i and 2i + 1.
+The leaf for value v is σ + v. A node at depth d (`d = floor(log2 id)`)
+covers `[lo, hi]` with `width = 2^(b−d)`, `lo = (id − 2^d) · width`,
+`hi = lo + width − 1`. The digest stores a sparse map of id → count
+(count > 0) and the total n.
+
+**Add(v, w).** Fail if v ≥ σ. `count[σ + v] += w` and `n += w`. If the map
+now has more than 6k nodes, run Compress.
+
+**Compress** (paper Algorithm 1, with "≤"). Let `L = floor(n / k)`. For
+depth d = b down to 1, take every sibling pair (2j, 2j + 1) at depth d
+where at least one of the two is present. If
+`count(2j) + count(2j+1) + count(j) ≤ L`, remove both children and add
+their counts to `count(j)`. Parents created at depth d − 1 are processed
+when that depth is reached. Pairs within a depth are independent, so
+their order does not matter.
+
+**Quantile(q).** Sort the nodes by `hi` ascending, then by id descending
+(smaller ranges first): this is the post-order. Scan, accumulating counts,
+and return `hi` of the first node where the sum exceeds q·n. If no node
+does (q = 1), return the last node's `hi`. The rank of the result is
+within [q·n, (q + ε)·n] with ε = b / k.
+
+**Rank(x).** The sum of counts of nodes with `hi ≤ x`. This is a lower
+bound.
+
+**Merge** (paper Algorithm 2). Requires equal b and k: add the counts of
+equal ids, add the totals, then Compress.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| b | u8 |
+| k | u32 |
+| n | u64 |
+| node count | u32 |
+| nodes | (u64 id, u64 count), sorted by id ascending |
+
+**References.**
+- Nisheeth Shrivastava, Chiranjeeb Buragohain, Divyakant Agrawal,
+  Subhash Suri, "Medians and Beyond: New Aggregation Techniques for Sensor
+  Networks", SenSys 2004, pp. 239–249: §3.1, Algorithms 1–2, §4.1.
+  <https://doi.org/10.1145/1031495.1031524> (arXiv:
+  <https://arxiv.org/abs/cs/0408039>)
+
+Vector: `testdata/vectors/qdigest.json`.

@@ -32,6 +32,7 @@ pub const cases = [_]Case{
     .{ .name = "count_min_sketch", .generate = genCountMin },
     .{ .name = "space_saving", .generate = genSpaceSaving },
     .{ .name = "tdigest", .generate = genTDigest },
+    .{ .name = "qdigest", .generate = genQDigest },
     .{ .name = "splitmix64", .generate = genSplitMix },
 };
 
@@ -326,6 +327,32 @@ fn genTDigest(arena: Allocator) anyerror![]const u8 {
         .quantiles = quantiles,
         .cdf = cdfs,
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, td)),
+    });
+}
+
+fn genQDigest(arena: Allocator) anyerror![]const u8 {
+    // σ = 2^8, k = 8 (compress at > 48 nodes). Values from SplitMix64(seed 2):
+    // v = (next() mod 16)^2, for 600 adds; then an explicit compress.
+    var qd = try probz.QDigest.init(arena, .{ .log_universe = 8, .k = 8 });
+    var g = probz.hash.SplitMix64.init(2);
+    for (0..600) |_| {
+        const u = g.below(16);
+        try qd.add(arena, u * u);
+    }
+    try qd.compress(arena);
+
+    const qs = [_]f64{ 0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99, 1 };
+    const Q = struct { q: f64, value: u64 };
+    var quantiles: [qs.len]Q = undefined;
+    for (qs, &quantiles) |q, *out| out.* = .{ .q = q, .value = try qd.quantile(q) };
+
+    return toJson(arena, .{
+        .description = "q-digest (SPEC.md §5.10): log_universe=8, k=8; 600 adds of v = (SplitMix64(seed 2).below(16))^2; compress; quantiles",
+        .params = .{ .log_universe = 8, .k = 8 },
+        .total = qd.count(),
+        .node_count = qd.nodeCount(),
+        .quantiles = quantiles,
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, qd)),
     });
 }
 
