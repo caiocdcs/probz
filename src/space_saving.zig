@@ -45,6 +45,8 @@ pub const SpaceSaving = struct {
     total: u64,
     /// Global update counter, for deterministic tie-breaking.
     seq: u64,
+    /// Index removals since the last rehash (tombstone cleanup).
+    removals: u32 = 0,
 
     pub const Entry = struct {
         /// Owned copy of the item.
@@ -135,6 +137,13 @@ pub const SpaceSaving = struct {
             const key = try allocator.dupe(u8, item);
             _ = self.index.remove(e.key);
             allocator.free(e.key);
+            // Evictions leave tombstones in the index; rehash periodically
+            // so lookups of absent keys stay short (amortized O(1)).
+            self.removals += 1;
+            if (self.removals >= self.index.capacity() / 2) {
+                self.index.rehash(std.hash_map.StringContext{});
+                self.removals = 0;
+            }
             self.seq += 1;
             // Assign fields one by one: a struct literal assigned to `e.*`
             // would overwrite `e.count` before reading it.
@@ -197,6 +206,7 @@ pub const SpaceSaving = struct {
         self.index.clearRetainingCapacity();
         self.total = 0;
         self.seq = 0;
+        self.removals = 0;
     }
 
     // -- heap ordered by (count, seq) -------------------------------------
