@@ -1,49 +1,31 @@
 const std = @import("std");
-const CountMinSketch = @import("probz").CountMinSketch;
-const DefaultCountMinSketch = @import("probz").DefaultCountMinSketch;
+const probz = @import("probz");
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Initialize with error bounds:
-    // epsilon = 0.01 (additive error about 1% of total count)
-    // delta   = 0.01 (1% probability of exceeding the error bound)
-    var cms = try DefaultCountMinSketch.initWithError(allocator, 0.01, 0.01);
-    defer cms.deinit();
+    // Additive error <= 1% of the total count, with probability 99%.
+    var cms = try probz.DefaultCountMinSketch.initWithError(allocator, 0.01, 0.01);
+    defer cms.deinit(allocator);
+    std.debug.print("width={d}, depth={d}\n", .{ cms.width, cms.depth });
 
-    std.debug.print("Initialized Count-Min Sketch (width={}, depth={})\n", .{ cms.width, cms.depth });
+    try cms.add("apple", 2);
+    try cms.add("banana", 3);
+    try cms.add("cherry", 1);
 
-    // Increment some items
-    try cms.set("apple"); // +1
-    try cms.set("apple"); // +1
-    try cms.setCount("banana", 3); // +3
-    try cms.set("cherry"); // +1
+    // Estimates are never below the true counts.
+    std.debug.print("apple  ~ {d}\n", .{cms.count("apple")});
+    std.debug.print("banana ~ {d}\n", .{cms.count("banana")});
+    std.debug.print("grape  ~ {d}\n", .{cms.count("grape")});
+    std.debug.print("error bound now: {d:.2}\n", .{cms.errorBound()});
 
-    // Estimates (are >= true counts due to overestimation)
-    const apple_count = cms.estimate("apple"); // >= 2
-    const banana_count = cms.estimate("banana"); // >= 3
-    const cherry_count = cms.estimate("cherry"); // >= 1
-    const grape_count = cms.estimate("grape"); // 0 (not seen)
-
-    std.debug.print("apple  ~ {}\n", .{apple_count});
-    std.debug.print("banana ~ {}\n", .{banana_count});
-    std.debug.print("cherry ~ {}\n", .{cherry_count});
-    std.debug.print("grape  ~ {}\n", .{grape_count});
-
-    // Initialize with explicit dimensions (width, depth)
-    // width controls accuracy (columns), depth controls confidence (rows)
-    var cms2 = try DefaultCountMinSketch.init(allocator, @intCast(cms.width), cms.depth);
-    defer cms2.deinit();
-
-    try cms2.setCount("banana", 2);
-    try cms2.setCount("dragonfruit", 4);
-
-    // Merge cms2 into cms (requires same width and depth)
-    try cms.merge(&cms2);
-
-    std.debug.print("\nAfter merge:\n", .{});
-    std.debug.print("banana ~ {}\n", .{cms.estimate("banana")}); // >= 3 + 2
-    std.debug.print("dragonfruit ~ {}\n", .{cms.estimate("dragonfruit")}); // >= 4
+    // Sketches with the same dimensions merge into the sketch of both streams.
+    var other = try probz.DefaultCountMinSketch.init(allocator, .{ .width = cms.width, .depth = cms.depth });
+    defer other.deinit(allocator);
+    try other.add("banana", 2);
+    try other.add("dragonfruit", 4);
+    try cms.merge(other);
+    std.debug.print("after merge: banana ~ {d}, dragonfruit ~ {d}\n", .{ cms.count("banana"), cms.count("dragonfruit") });
 }

@@ -32,7 +32,7 @@ pub fn TopKTracker(comptime FrequencyEstimator: type) type {
             defer allocator.free(items);
 
             for (candidates, 0..) |candidate, i| {
-                const freq = estimator.estimate(candidate);
+                const freq = estimator.count(candidate);
 
                 const owned_item = try allocator.dupe(u8, candidate);
                 items[i] = TopKItem{
@@ -88,7 +88,7 @@ test "TopKTracker with mock estimator" {
             try self.frequencies.put(item, freq);
         }
 
-        pub fn estimate(self: *const Self, item: []const u8) u64 {
+        pub fn count(self: *const Self, item: []const u8) u64 {
             return self.frequencies.get(item) orelse 0;
         }
     };
@@ -120,7 +120,7 @@ test "TopKTracker with mock estimator" {
 
 test "TopKTracker edge cases" {
     const MockEstimator = struct {
-        pub fn estimate(_: *const @This(), _: []const u8) u64 {
+        pub fn count(_: *const @This(), _: []const u8) u64 {
             return 42;
         }
     };
@@ -139,7 +139,7 @@ test "TopKTracker edge cases" {
 
 test "TopKTracker with equal frequencies" {
     const MockEstimator = struct {
-        pub fn estimate(_: *const @This(), _: []const u8) u64 {
+        pub fn count(_: *const @This(), _: []const u8) u64 {
             return 10;
         }
     };
@@ -158,7 +158,7 @@ test "TopKTracker with equal frequencies" {
 
 test "TopKTracker with k larger than candidates" {
     const MockEstimator = struct {
-        pub fn estimate(self: *const @This(), item: []const u8) u64 {
+        pub fn count(self: *const @This(), item: []const u8) u64 {
             _ = self;
             if (std.mem.eql(u8, item, "x")) return 5;
             if (std.mem.eql(u8, item, "y")) return 3;
@@ -184,7 +184,7 @@ test "TopKTracker with k larger than candidates" {
 
 test "TopKTracker with zero frequencies" {
     const MockEstimator = struct {
-        pub fn estimate(self: *const @This(), item: []const u8) u64 {
+        pub fn count(self: *const @This(), item: []const u8) u64 {
             _ = self;
             if (std.mem.eql(u8, item, "existing")) return 42;
             return 0;

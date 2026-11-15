@@ -4,18 +4,18 @@ const probz = @import("probz");
 const DefaultCountMinSketch = probz.DefaultCountMinSketch;
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var cms = try DefaultCountMinSketch.init(allocator, 1024, 5);
-    defer cms.deinit();
+    var cms = try DefaultCountMinSketch.init(allocator, .{ .width = 1024, .depth = 5 });
+    defer cms.deinit(allocator);
 
-    try cms.setCount("apple", 100);
-    try cms.setCount("banana", 200);
-    try cms.setCount("cherry", 50);
-    try cms.setCount("date", 150);
-    try cms.setCount("elderberry", 75);
+    try cms.add("apple", 100);
+    try cms.add("banana", 200);
+    try cms.add("cherry", 50);
+    try cms.add("date", 150);
+    try cms.add("elderberry", 75);
 
     const tracker = probz.TopKTracker(DefaultCountMinSketch);
     const candidates = [_][]const u8{ "apple", "banana", "cherry", "date", "elderberry", "fig" };

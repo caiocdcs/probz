@@ -29,6 +29,7 @@ pub const cases = [_]Case{
     .{ .name = "cuckoo_filter", .generate = genCuckoo },
     .{ .name = "quotient_filter", .generate = genQuotient },
     .{ .name = "hyperloglog", .generate = genHyperLogLog },
+    .{ .name = "count_min_sketch", .generate = genCountMin },
     .{ .name = "splitmix64", .generate = genSplitMix },
 };
 
@@ -254,6 +255,32 @@ fn genHyperLogLog(arena: Allocator) anyerror![]const u8 {
         .checkpoints = checkpoints.items,
         .registers = hll.registers,
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, hll)),
+    });
+}
+
+fn genCountMin(arena: Allocator) anyerror![]const u8 {
+    var cms = try probz.CountMinSketch(u16).init(arena, .{ .width = 16, .depth = 3 });
+    const items = try inputs(arena, 40);
+    // item-i is added with amount i + 1 for i < 30.
+    for (items[0..30], 0..) |item, i| try cms.add(item, @intCast(i + 1));
+    const counts = try arena.alloc(u64, items.len);
+    for (items, counts) |item, *c| c.* = cms.count(item);
+
+    // Row indexes for the first three items, to pin the derivation.
+    const Rows = struct { input: []const u8, columns: [3]u64 };
+    var rows: [3]Rows = undefined;
+    for (&rows, items[0..3]) |*r, item| {
+        var g = probz.hash.SplitMix64.init(probz.hash.hashBytes(item));
+        r.* = .{ .input = item, .columns = .{ g.below(16), g.below(16), g.below(16) } };
+    }
+
+    return toJson(arena, .{
+        .description = "Count-Min sketch, u16 counters (SPEC.md §5.7): width=16, depth=3; add item-i with amount i+1 for i < 30; count(item-0..item-39)",
+        .params = .{ .width = 16, .depth = 3, .counter_bits = 16 },
+        .row_columns = rows,
+        .total = cms.total,
+        .counts = counts,
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cms)),
     });
 }
 

@@ -518,3 +518,47 @@ Standard error: 1.04 / √m.
   <https://doi.org/10.1145/2452376.2452456>
 
 Vector: `testdata/vectors/hyperloglog.json`.
+
+### 5.7 Count-Min sketch (tag 7)
+
+**Parameters.** Width w > 0, depth d > 0, and a counter width (8–64 bits,
+default 32). From error bounds: `w = ceil(e / ε)` and
+`d = max(1, ceil(ln(1 / δ)))`, for 0 < ε, δ < 1.
+
+**Row indexes.** With `h = H(item)`, let g be SplitMix64 (§2.3) seeded
+with h. The column for row j (j = 0 … d−1) is the j-th output
+`g.below(w)`. The counter is `C[j · w + column]`.
+
+**Add(item, c).** If any of the d counters, or the total N, would exceed
+its maximum, fail without changing anything. Otherwise add c to each of
+the d counters and to N.
+
+**Count.** The minimum of the d counters. It is never below the true
+count, and with probability ≥ 1 − δ it is at most the true count + ε·N.
+
+**Merge.** Requires equal w, d, and counter width: element-wise addition
+plus the totals, failing without changes on overflow.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| counter bits | u8 |
+| d | u32 |
+| w | u64 |
+| N | u64 |
+| counters | d·w, row-major, each ceil(bits / 8)-byte little-endian |
+
+**Deviation.** The analysis assumes d independent pairwise-independent
+hash functions. probz uses SplitMix64 outputs seeded with H(item) so
+every row depends only on the 64-bit item hash.
+
+**References.**
+- Graham Cormode, S. Muthukrishnan, "An Improved Data Stream Summary: The
+  Count-Min Sketch and its Applications", Journal of Algorithms
+  55(1):58–75, 2005. <https://doi.org/10.1016/j.jalgor.2003.12.001>
+- Parameters and guarantee as restated in Kirsch & Mitzenmacher, Random
+  Structures & Algorithms 33(2), 2008, §9.1.
+  <https://doi.org/10.1002/rsa.20208>
+
+Vector: `testdata/vectors/count_min_sketch.json`.

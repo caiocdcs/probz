@@ -1,264 +1,282 @@
-//! Count-Min Sketch is a probabilistic frequency estimation data structure.
-//! It supports approximate point queries (frequency of an item) with
-//! sublinear space and O(1) update/query time.
+//! Count-Min sketch: approximate frequencies for a stream of (item, count)
+//! updates in d × w counters. See SPEC.md §5.7.
 //!
-//! Typical parametrization is by error bounds (epsilon, delta), where:
-//!  - epsilon controls the additive error (~ epsilon * total count)
-//!  - delta controls the probability of the estimate exceeding the true count by the error bound
+//! Each update increments one counter per row; a point query returns the
+//! minimum over the rows. With w = ⌈e / ε⌉ and d = ⌈ln(1 / δ)⌉ the
+//! estimate â of an item's true count a satisfies â ≥ a and, with
+//! probability at least 1 − δ, â ≤ a + ε·N, where N is the total of all
+//! counts.
 //!
-//! The classic formulas are:
-//!  - width (w)  = ceil(e / epsilon)
-//!  - depth (d)  = ceil(ln(1 / delta))
+//! The analysis assumes d pairwise-independent hash functions. probz
+//! derives the d row indexes from one XxHash64 by taking successive
+//! SplitMix64 outputs seeded with that hash (SPEC.md §2.3): a practical
+//! substitute that keeps every row hash a function of H(item), so callers
+//! can pass precomputed hashes.
+//!
+//! # References
+//!
+//! - Graham Cormode, S. Muthukrishnan, "An Improved Data Stream Summary:
+//!   The Count-Min Sketch and its Applications", Journal of Algorithms
+//!   55(1):58–75, 2005. https://doi.org/10.1016/j.jalgor.2003.12.001
+//! - The parameters and guarantee above are as restated in Kirsch &
+//!   Mitzenmacher, Random Structures & Algorithms 33(2), 2008, §9.1
+//!   "Count-Min Sketch Review". https://doi.org/10.1002/rsa.20208
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const math = std.math;
-const hash = std.hash;
+const Allocator = std.mem.Allocator;
 
-pub const CountMinSketchError = error{
-    CounterOverflow,
-    InvalidDimensions,
-    InvalidParameters,
-};
+const hashing = @import("hash.zig");
+const serde = @import("serde.zig");
 
-/// Default counter type for the Count-Min Sketch.
+/// Count-Min sketch with 32-bit counters.
 pub const DefaultCountMinSketch = CountMinSketch(u32);
 
-/// Create a Count-Min Sketch parametrized by counter type.
-/// CounterType must be an unsigned integer type.
-pub fn CountMinSketch(comptime CounterType: type) type {
+/// `Counter`: unsigned integer of 8 to 64 bits.
+pub fn CountMinSketch(comptime Counter: type) type {
+    const info = @typeInfo(Counter);
+    if (info != .int or info.int.signedness != .unsigned or info.int.bits < 8 or info.int.bits > 64)
+        @compileError("CountMinSketch: Counter must be an unsigned integer of 8..64 bits");
+
     return struct {
         const Self = @This();
+        const Wire = std.meta.Int(.unsigned, ((info.int.bits + 7) / 8) * 8);
 
-        allocator: Allocator,
         width: u64,
-        depth: u8,
-        counters: []CounterType,
+        depth: u32,
+        /// Row-major, `depth * width` counters.
+        counters: []Counter,
+        /// N: the sum of all added amounts.
+        total: u64,
 
-        /// Initialize a Count-Min Sketch with explicit width and depth.
-        /// width > 0, depth > 0
-        pub fn init(allocator: Allocator, width: usize, depth: u8) !Self {
-            if (width == 0 or depth == 0) return CountMinSketchError.InvalidDimensions;
+        pub const Options = struct {
+            /// Counters per row (w > 0).
+            width: u64,
+            /// Number of rows (d > 0).
+            depth: u32,
+        };
 
-            const total_len: usize = width * @as(usize, depth);
-            const counters = try allocator.alloc(CounterType, total_len);
+        pub const InitError = error{InvalidParameters} || Allocator.Error;
+        pub const AddError = error{Overflow};
+        pub const MergeError = error{ IncompatibleSketches, Overflow };
+
+        pub fn init(allocator: Allocator, options: Options) InitError!Self {
+            if (options.width == 0 or options.depth == 0) return error.InvalidParameters;
+            const n = math.mul(u64, options.width, options.depth) catch return error.OutOfMemory;
+            const counters = try allocator.alloc(Counter, math.cast(usize, n) orelse return error.OutOfMemory);
             @memset(counters, 0);
+            return .{ .width = options.width, .depth = options.depth, .counters = counters, .total = 0 };
+        }
 
-            return Self{
-                .allocator = allocator,
-                .width = width,
-                .depth = depth,
-                .counters = counters,
+        /// Size for additive error ε·N with probability 1 − δ:
+        /// w = ⌈e / ε⌉, d = ⌈ln(1 / δ)⌉. Requires 0 < ε < 1 and 0 < δ < 1.
+        pub fn initWithError(allocator: Allocator, epsilon: f64, delta: f64) InitError!Self {
+            return init(allocator, try dimensionsForError(epsilon, delta));
+        }
+
+        pub fn dimensionsForError(epsilon: f64, delta: f64) error{InvalidParameters}!Options {
+            if (!(epsilon > 0 and epsilon < 1) or !(delta > 0 and delta < 1)) return error.InvalidParameters;
+            return .{
+                .width = @intFromFloat(@ceil(math.e / epsilon)),
+                .depth = @intFromFloat(@max(1.0, @ceil(@log(1.0 / delta)))),
             };
         }
 
-        /// Initialize a Count-Min Sketch using error bounds.
-        /// epsilon controls additive error; delta controls confidence:
-        ///  - width = ceil(e/epsilon)
-        ///  - depth = ceil(ln(1/delta))
-        pub fn initWithError(allocator: Allocator, epsilon: f64, delta: f64) !Self {
-            if (!(epsilon > 0.0 and epsilon < 1.0)) return CountMinSketchError.InvalidParameters;
-            if (!(delta > 0.0 and delta < 1.0)) return CountMinSketchError.InvalidParameters;
-
-            const w = calculateWidth(epsilon);
-            const d = calculateDepth(delta);
-            return try Self.init(allocator, w, d);
+        pub fn deinit(self: *Self, allocator: Allocator) void {
+            allocator.free(self.counters);
+            self.* = undefined;
         }
 
-        pub fn deinit(self: *Self) void {
-            self.allocator.free(self.counters);
+        /// Add `amount` occurrences of an item. Fails without changing
+        /// anything if a counter or the total would overflow.
+        pub fn add(self: *Self, item: []const u8, amount: Counter) AddError!void {
+            return self.addHash(hashing.hashBytes(item), amount);
         }
 
-        /// Increment the count of an item by 1.
-        pub fn set(self: *Self, item: []const u8) CountMinSketchError!void {
-            try self.setCount(item, 1);
-        }
-
-        /// Increment the count of an item by a given amount.
-        pub fn setCount(self: *Self, item: []const u8, amount: CounterType) CountMinSketchError!void {
+        pub fn addHash(self: *Self, h: u64, amount: Counter) AddError!void {
             if (amount == 0) return;
-
-            const hashes = computeHashes(item);
-
-            // For each row, increment the corresponding bucket
-            var row: u32 = 0;
-            while (row < self.depth) : (row += 1) {
-                const idx = self.calculateIndex(&hashes, row);
-                const cell_index = rowCellOffset(self.width, row) + idx;
-
-                const old_val = self.counters[cell_index];
-                const result = addChecked(CounterType, old_val, amount) catch return CountMinSketchError.CounterOverflow;
-                self.counters[cell_index] = result;
+            const new_total = math.add(u64, self.total, amount) catch return error.Overflow;
+            var rows = RowIterator.init(self, h);
+            while (rows.next()) |i| {
+                if (math.maxInt(Counter) - self.counters[i] < amount) return error.Overflow;
             }
+            rows = RowIterator.init(self, h);
+            while (rows.next()) |i| self.counters[i] += amount;
+            self.total = new_total;
         }
 
-        /// Estimate the count of an item.
-        /// Returns the minimum over the rows for the item's hashed positions.
-        pub fn estimate(self: *const Self, item: []const u8) u64 {
-            const hashes = computeHashes(item);
-
-            var min_val: u64 = std.math.maxInt(u64);
-
-            var row: u32 = 0;
-            while (row < self.depth) : (row += 1) {
-                const idx = self.calculateIndex(&hashes, row);
-                const cell_index = rowCellOffset(self.width, row) + idx;
-
-                const v: u64 = self.counters[cell_index];
-                if (v < min_val) {
-                    min_val = v;
-                }
-            }
-
-            if (min_val == std.math.maxInt(u64)) return 0 else return min_val;
+        /// Estimated count: never below the true count.
+        pub fn count(self: Self, item: []const u8) u64 {
+            return self.countHash(hashing.hashBytes(item));
         }
 
-        /// Merge another sketch into this one by summing counters.
-        /// Both sketches must have the same width and depth.
-        pub fn merge(self: *Self, other: *const Self) CountMinSketchError!void {
-            if (self.width != other.width or self.depth != other.depth) {
-                return CountMinSketchError.InvalidDimensions;
-            }
-
-            // Merge counters with overflow checking
-            for (self.counters, 0..) |*dst, i| {
-                const src = other.counters[i];
-                const summed = addChecked(CounterType, dst.*, src) catch return CountMinSketchError.CounterOverflow;
-                dst.* = summed;
-            }
+        pub fn countHash(self: Self, h: u64) u64 {
+            var min: u64 = math.maxInt(u64);
+            var rows = RowIterator.init(&self, h);
+            while (rows.next()) |i| min = @min(min, self.counters[i]);
+            return min;
         }
 
-        /// Calculate array index using double hashing: h1(x) + i * h2(x) mod width.
-        pub inline fn calculateIndex(self: *const Self, hash_pair: *const HashPair, row: u32) u64 {
-            const combined = @as(u64, hash_pair.hash1) +% (@as(u64, row) *% @as(u64, hash_pair.hash2));
-            return combined % self.width;
+        /// Additive error bound ε·N for the current total, with ε = e / w.
+        pub fn errorBound(self: Self) f64 {
+            return math.e / @as(f64, @floatFromInt(self.width)) * @as(f64, @floatFromInt(self.total));
+        }
+
+        /// Sum of two sketches of the same dimensions (the sketch of the
+        /// combined stream). Fails without changes on overflow.
+        pub fn merge(self: *Self, other: Self) MergeError!void {
+            if (self.width != other.width or self.depth != other.depth) return error.IncompatibleSketches;
+            const new_total = math.add(u64, self.total, other.total) catch return error.Overflow;
+            for (self.counters, other.counters) |a, b| {
+                if (math.maxInt(Counter) - a < b) return error.Overflow;
+            }
+            for (self.counters, other.counters) |*a, b| a.* += b;
+            self.total = new_total;
+        }
+
+        pub fn clear(self: *Self) void {
+            @memset(self.counters, 0);
+            self.total = 0;
+        }
+
+        pub fn memoryBytes(self: Self) usize {
+            return self.counters.len * @sizeOf(Counter);
+        }
+
+        /// Counter indexes for one item: row j uses the j-th SplitMix64
+        /// output seeded with the item hash, modulo w.
+        const RowIterator = struct {
+            sketch: *const Self,
+            rng: hashing.SplitMix64,
+            row: u32 = 0,
+
+            fn init(sketch: *const Self, h: u64) RowIterator {
+                return .{ .sketch = sketch, .rng = .init(h) };
+            }
+
+            fn next(it: *RowIterator) ?usize {
+                if (it.row == it.sketch.depth) return null;
+                const col = it.rng.below(it.sketch.width);
+                const idx = @as(u64, it.row) * it.sketch.width + col;
+                it.row += 1;
+                return @intCast(idx);
+            }
+        };
+
+        /// Body (tag 7): u8 counter bits, u32 d, u64 w, u64 N, then d·w
+        /// counters row-major, each little-endian in ceil(bits / 8) bytes.
+        pub fn serialize(self: Self, w: *std.Io.Writer) serde.WriteError!void {
+            try serde.writeHeader(w, .count_min_sketch);
+            try w.writeByte(info.int.bits);
+            try serde.writeInt(w, u32, self.depth);
+            try serde.writeInt(w, u64, self.width);
+            try serde.writeInt(w, u64, self.total);
+            for (self.counters) |c| try serde.writeInt(w, Wire, c);
+        }
+
+        pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!Self {
+            try serde.readHeader(r, .count_min_sketch);
+            if (try r.takeByte() != info.int.bits) return error.InvalidData;
+            const depth = try serde.readInt(r, u32);
+            const width = try serde.readInt(r, u64);
+            var self = init(allocator, .{ .width = width, .depth = depth }) catch |err| return serde.fromInitError(err);
+            errdefer self.deinit(allocator);
+            self.total = try serde.readInt(r, u64);
+            for (self.counters) |*c| c.* = math.cast(Counter, try serde.readInt(r, Wire)) orelse return error.InvalidData;
+            return self;
         }
     };
-}
-
-/// Compute width as ceil(e / epsilon)
-fn calculateWidth(epsilon: f64) usize {
-    return @intFromFloat(math.ceil(math.e / epsilon));
-}
-
-/// Compute depth as ceil(ln(1 / delta))
-fn calculateDepth(delta: f64) u8 {
-    const v = math.log(f64, math.e, 1.0 / delta);
-    return @intFromFloat(math.ceil(v));
-}
-
-/// Single 64-bit hash split into two 32-bit halves for double hashing
-const HashPair = struct {
-    hash1: u32,
-    hash2: u32,
-};
-
-inline fn computeHashes(item: []const u8) HashPair {
-    const h = hash.XxHash64.hash(0, item);
-    const h1: u32 = @truncate(h);
-    const h2: u32 = @truncate(h >> 32);
-    return HashPair{
-        .hash1 = h1,
-        .hash2 = h2 | 1, // ensure odd to avoid cycling when depth is large
-    };
-}
-
-/// Row offset in the flattened 2D array
-inline fn rowCellOffset(width: u64, row: u32) usize {
-    return @intCast(@as(u64, row) * width);
-}
-
-/// Checked addition for arbitrary unsigned integer CounterType.
-/// Returns error on overflow.
-inline fn addChecked(comptime T: type, a: T, b: T) !T {
-    const s = @addWithOverflow(a, b);
-    if (s[1] == 1) return CountMinSketchError.CounterOverflow;
-    return s[0];
 }
 
 const testing = std.testing;
 
-test "init by dimensions" {
-    var cms = try CountMinSketch(u16).init(testing.allocator, 1024, 5);
-    defer cms.deinit();
-
-    try testing.expectEqual(@as(u64, 1024), cms.width);
-    try testing.expectEqual(@as(u8, 5), cms.depth);
+test "dimensions from error bounds" {
+    const d = try DefaultCountMinSketch.dimensionsForError(0.01, 0.01);
+    try testing.expectEqual(@as(u64, 272), d.width); // ceil(e / 0.01)
+    try testing.expectEqual(@as(u32, 5), d.depth); // ceil(ln 100)
+    try testing.expectError(error.InvalidParameters, DefaultCountMinSketch.dimensionsForError(0, 0.1));
+    try testing.expectError(error.InvalidParameters, DefaultCountMinSketch.dimensionsForError(0.1, 1));
+    try testing.expectError(error.InvalidParameters, DefaultCountMinSketch.init(testing.allocator, .{ .width = 0, .depth = 1 }));
 }
 
-test "init with error bounds" {
-    var cms = try DefaultCountMinSketch.initWithError(testing.allocator, 0.01, 0.01);
-    defer cms.deinit();
+test "add and count" {
+    var cms = try DefaultCountMinSketch.init(testing.allocator, .{ .width = 2048, .depth = 5 });
+    defer cms.deinit(testing.allocator);
 
-    // width = ceil(e / 0.01) = ceil(271.828...) = 272
-    // depth = ceil(ln(1/0.01)) = ceil(4.6051...) = 5
-    try testing.expectEqual(@as(u64, 272), cms.width);
-    try testing.expectEqual(@as(u8, 5), cms.depth);
+    try cms.add("apple", 3);
+    try cms.add("banana", 10);
+    try cms.add("apple", 1);
+    try testing.expectEqual(@as(u64, 4), cms.count("apple"));
+    try testing.expectEqual(@as(u64, 10), cms.count("banana"));
+    try testing.expectEqual(@as(u64, 0), cms.count("cherry"));
+    try testing.expectEqual(@as(u64, 14), cms.total);
 }
 
-test "set and estimate single item" {
-    var cms = try DefaultCountMinSketch.init(testing.allocator, 4096, 5);
-    defer cms.deinit();
-
-    try cms.set("apple");
-    try cms.set("apple");
-    try cms.set("apple");
-
-    const est = cms.estimate("apple");
-    try testing.expect(est >= 3); // due to overestimation, must be >= true count
-
-    const est_unknown = cms.estimate("banana");
-    try testing.expectEqual(@as(u64, 0), est_unknown);
+test "overflow is detected without partial updates" {
+    var cms = try CountMinSketch(u8).init(testing.allocator, .{ .width = 128, .depth = 4 });
+    defer cms.deinit(testing.allocator);
+    try cms.add("x", 255);
+    try testing.expectError(error.Overflow, cms.add("x", 1));
+    try testing.expectEqual(@as(u64, 255), cms.count("x"));
+    try testing.expectEqual(@as(u64, 255), cms.total);
 }
 
-test "setCount and estimate multiple items" {
-    var cms = try CountMinSketch(u16).init(testing.allocator, 2048, 6);
-    defer cms.deinit();
+test "error bound holds with probability 1 - delta" {
+    const epsilon = 0.001;
+    const delta = 0.01;
+    var cms = try DefaultCountMinSketch.initWithError(testing.allocator, epsilon, delta);
+    defer cms.deinit(testing.allocator);
 
-    try cms.setCount("banana", 10);
-    try cms.setCount("apple", 5);
-    try cms.set("apple"); // +1
-
-    const c_banana = cms.estimate("banana");
-    const c_apple = cms.estimate("apple");
-
-    try testing.expect(c_banana >= 10);
-    try testing.expect(c_apple >= 6);
+    // Zipf-like stream: item-i appears floor(1000 / (i + 1)) times.
+    const distinct = 20_000;
+    var buf: [32]u8 = undefined;
+    for (0..distinct) |i| {
+        const c: u32 = @intCast(@max(1, 1000 / (i + 1)));
+        try cms.add(try std.fmt.bufPrint(&buf, "item-{d}", .{i}), c);
+    }
+    const bound = epsilon * @as(f64, @floatFromInt(cms.total));
+    var violations: usize = 0;
+    for (0..distinct) |i| {
+        const truth: u64 = @max(1, 1000 / (i + 1));
+        const est = cms.count(try std.fmt.bufPrint(&buf, "item-{d}", .{i}));
+        try testing.expect(est >= truth);
+        if (@as(f64, @floatFromInt(est - truth)) > bound) violations += 1;
+    }
+    try testing.expect(@as(f64, @floatFromInt(violations)) / distinct <= delta);
 }
 
-test "merge two sketches" {
-    var a = try DefaultCountMinSketch.init(testing.allocator, 1024, 5);
-    defer a.deinit();
+test "merge equals the combined stream" {
+    var a = try DefaultCountMinSketch.init(testing.allocator, .{ .width = 512, .depth = 4 });
+    defer a.deinit(testing.allocator);
+    var b = try DefaultCountMinSketch.init(testing.allocator, .{ .width = 512, .depth = 4 });
+    defer b.deinit(testing.allocator);
+    var all = try DefaultCountMinSketch.init(testing.allocator, .{ .width = 512, .depth = 4 });
+    defer all.deinit(testing.allocator);
 
-    var b = try DefaultCountMinSketch.init(testing.allocator, 1024, 5);
-    defer b.deinit();
+    var buf: [32]u8 = undefined;
+    for (0..1000) |i| {
+        const item = try std.fmt.bufPrint(&buf, "item-{d}", .{i % 300});
+        if (i % 2 == 0) try a.add(item, 1) else try b.add(item, 1);
+        try all.add(item, 1);
+    }
+    try a.merge(b);
+    try testing.expectEqualSlices(u32, all.counters, a.counters);
+    try testing.expectEqual(all.total, a.total);
 
-    try a.setCount("a", 2);
-    try b.setCount("b", 3);
-
-    try a.merge(&b);
-
-    const ea = a.estimate("a");
-    const eb = a.estimate("b");
-
-    try testing.expect(ea >= 2);
-    try testing.expect(eb >= 3);
+    var c = try DefaultCountMinSketch.init(testing.allocator, .{ .width = 256, .depth = 4 });
+    defer c.deinit(testing.allocator);
+    try testing.expectError(error.IncompatibleSketches, a.merge(c));
 }
 
-test "overflow on small counter type" {
-    var cms = try CountMinSketch(u8).init(testing.allocator, 128, 4);
-    defer cms.deinit();
-
-    try cms.setCount("x", 255);
-    try testing.expectError(CountMinSketchError.CounterOverflow, cms.set("x"));
-}
-
-test "invalid parameters" {
-    try testing.expectError(CountMinSketchError.InvalidDimensions, DefaultCountMinSketch.init(testing.allocator, 0, 1));
-    try testing.expectError(CountMinSketchError.InvalidDimensions, DefaultCountMinSketch.init(testing.allocator, 10, 0));
-
-    try testing.expectError(CountMinSketchError.InvalidParameters, DefaultCountMinSketch.initWithError(testing.allocator, 0.0, 0.1));
-    try testing.expectError(CountMinSketchError.InvalidParameters, DefaultCountMinSketch.initWithError(testing.allocator, 1.1, 0.1));
-    try testing.expectError(CountMinSketchError.InvalidParameters, DefaultCountMinSketch.initWithError(testing.allocator, 0.1, 0.0));
-    try testing.expectError(CountMinSketchError.InvalidParameters, DefaultCountMinSketch.initWithError(testing.allocator, 0.1, 1.1));
+test "serialize round trip" {
+    var cms = try CountMinSketch(u16).init(testing.allocator, .{ .width = 32, .depth = 3 });
+    defer cms.deinit(testing.allocator);
+    try cms.add("x", 7);
+    const bytes = try serde.toOwnedBytes(testing.allocator, cms);
+    defer testing.allocator.free(bytes);
+    var r: std.Io.Reader = .fixed(bytes);
+    var back = try CountMinSketch(u16).deserialize(testing.allocator, &r);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqualSlices(u16, cms.counters, back.counters);
+    try testing.expectEqual(@as(u64, 7), back.count("x"));
 }
