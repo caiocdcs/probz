@@ -470,3 +470,51 @@ Yield `(quot, R[p])`.
   <https://vldb.org/pvldb/vol5/p1627_michaelabender_vldb2012.pdf>)
 
 Vector: `testdata/vectors/quotient_filter.json`.
+
+### 5.6 HyperLogLog (tag 6)
+
+**Parameters.** Precision p in [4, 18] (default 14). There are m = 2^p
+registers, each a u8, initially 0.
+
+**Add.** With `h = H(item)`:
+
+```
+j   = h >> (64 - p)
+w   = ((h << p) mod 2^64) OR 2^(p-1)
+rho = clz64(w) + 1                  # 1 .. 64 - p + 1
+M[j] = max(M[j], rho)
+```
+
+**Cardinality** (Flajolet et al., Figure 3, without the 32-bit
+large-range correction):
+
+```
+alpha = 0.673 (m=16), 0.697 (m=32), 0.709 (m=64), else 0.7213 / (1 + 1.079 / m)
+E = alpha · m^2 / Σ_j 2^(-M[j])
+V = number of j with M[j] = 0
+if E <= 2.5·m and V > 0: return m · ln(m / V)
+return E
+```
+
+Standard error: 1.04 / √m.
+
+**Merge.** Requires equal p: register-wise max.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| p | u8 |
+| registers | m × u8 (each ≤ 64 − p + 1) |
+
+**References.**
+- Philippe Flajolet, Éric Fusy, Olivier Gandouet, Frédéric Meunier,
+  "HyperLogLog: the analysis of a near-optimal cardinality estimation
+  algorithm", AofA 2007, DMTCS Proceedings AH:137–156, Figure 3.
+  <https://doi.org/10.46298/dmtcs.3545> (PDF:
+  <https://algo.inria.fr/flajolet/Publications/FlFuGaMe07.pdf>)
+- Stefan Heule, Marc Nunkesser, Alexander Hall, "HyperLogLog in
+  Practice", EDBT 2013, pp. 683–692, §5.1.
+  <https://doi.org/10.1145/2452376.2452456>
+
+Vector: `testdata/vectors/hyperloglog.json`.

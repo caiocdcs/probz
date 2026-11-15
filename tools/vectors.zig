@@ -28,6 +28,7 @@ pub const cases = [_]Case{
     .{ .name = "scalable_bloom_filter", .generate = genScalableBloom },
     .{ .name = "cuckoo_filter", .generate = genCuckoo },
     .{ .name = "quotient_filter", .generate = genQuotient },
+    .{ .name = "hyperloglog", .generate = genHyperLogLog },
     .{ .name = "splitmix64", .generate = genSplitMix },
 };
 
@@ -235,6 +236,24 @@ fn genQuotient(arena: Allocator) anyerror![]const u8 {
         .entries_after_remove = stored.items,
         .contains_after_remove = present,
         .serialized_after_remove = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, qf)),
+    });
+}
+
+fn genHyperLogLog(arena: Allocator) anyerror![]const u8 {
+    var hll = try probz.HyperLogLog.init(arena, .{ .precision = 6 });
+    const items = try inputs(arena, 5000);
+    const Checkpoint = struct { n: usize, cardinality: f64 };
+    var checkpoints: std.ArrayList(Checkpoint) = .empty;
+    for (items, 1..) |item, n| {
+        hll.add(item);
+        if (n == 10 or n == 100 or n == 1000 or n == 5000) try checkpoints.append(arena, .{ .n = n, .cardinality = hll.cardinality() });
+    }
+    return toJson(arena, .{
+        .description = "HyperLogLog (SPEC.md §5.6): precision=6; add item-0..item-4999; cardinality after n items",
+        .params = .{ .precision = 6 },
+        .checkpoints = checkpoints.items,
+        .registers = hll.registers,
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, hll)),
     });
 }
 

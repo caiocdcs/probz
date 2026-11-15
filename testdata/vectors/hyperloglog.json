@@ -1,0 +1,26 @@
+{
+  "description": "HyperLogLog (SPEC.md §5.6): precision=6; add item-0..item-4999; cardinality after n items",
+  "params": {
+    "precision": 6
+  },
+  "checkpoints": [
+    {
+      "n": 10,
+      "cardinality": 9.699193480140856
+    },
+    {
+      "n": 100,
+      "cardinality": 112.70321987592328
+    },
+    {
+      "n": 1000,
+      "cardinality": 1120.0608421845575
+    },
+    {
+      "n": 5000,
+      "cardinality": 4555.198255283502
+    }
+  ],
+  "registers": "\t\n\f\u0006\u000b\u0007\b\u0006\u0006\t\n\t\b\t\b\u0006\u0004\f\u0006\u0007\u0005\u0006\t\u0006\u0005\b\u0005\u0007\u0006\b\u0007\u0007\u0007\b\f\t\u0006\u0005\n\n\u0007\u000b\u0007\u0005\u000f\u000b\b\u0006\t\u0005\n\t\u000b\u0006\u0005\u0007\u0010\u0007\u0007\u0007\u000f\n\u0007\u0005",
+  "serialized": "5052425a010606090a0c060b07080606090a0908090806040c060705060906050805070608070707080c0906050a0a070b07050f0b080609050a090b060507100707070f0a0705"
+}

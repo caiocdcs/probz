@@ -42,6 +42,15 @@ pub const ReadError = error{
     InvalidData,
 } || Reader.Error || std.mem.Allocator.Error;
 
+/// Map a structure's `init` error to a read error: parameters read from the
+/// wire that `init` rejects make the data invalid.
+pub fn fromInitError(err: error{ InvalidParameters, OutOfMemory }) ReadError {
+    return switch (err) {
+        error.InvalidParameters => error.InvalidData,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
 pub fn writeHeader(w: *Writer, tag: Tag) WriteError!void {
     try w.writeAll(magic);
     try w.writeByte(version);

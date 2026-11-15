@@ -1,44 +1,23 @@
 const std = @import("std");
-const HyperLogLog = @import("probz").HyperLogLog;
+const probz = @import("probz");
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create a HyperLogLog with precision 10 (1024 buckets)
-    var hll = try HyperLogLog.init(allocator, 10);
-    defer hll.deinit();
+    // p = 12: 4096 one-byte registers, standard error ~1.6%.
+    var hll = try probz.HyperLogLog.init(allocator, .{ .precision = 12 });
+    defer hll.deinit(allocator);
 
-    // Add some items to the estimator
-    hll.add("apple");
-    hll.add("banana");
-    hll.add("cherry");
-
-    const size1 = hll.estimatedSize();
-    std.debug.print("Estimated size after 3 items: {d:.1}\n", .{size1});
-
-    // Add more items
     var buf: [32]u8 = undefined;
-    for (0..100) |i| {
-        const item = try std.fmt.bufPrint(&buf, "item-{d}", .{i});
-        hll.add(item);
-    }
+    for (0..100_000) |i| hll.add(try std.fmt.bufPrint(&buf, "user-{d}", .{i % 50_000}));
+    std.debug.print("distinct users (true 50000): {d:.0} (std error {d:.2}%)\n", .{ hll.cardinality(), hll.standardError() * 100 });
 
-    const size2 = hll.estimatedSize();
-    std.debug.print("Estimated size after 103 items: {d:.1}\n", .{size2});
-
-    // Demonstrate merging
-    var hll2 = try HyperLogLog.init(allocator, 10);
-    defer hll2.deinit();
-
-    hll2.add("orange");
-    hll2.add("grape");
-
-    const size_before_merge = hll.estimatedSize();
-    try hll.merge(&hll2);
-    const size_after_merge = hll.estimatedSize();
-
-    std.debug.print("Size before merge: {d:.1}\n", .{size_before_merge});
-    std.debug.print("Size after merge: {d:.1}\n", .{size_after_merge});
+    // Union of two sketches: merge registers.
+    var other = try probz.HyperLogLog.init(allocator, .{ .precision = 12 });
+    defer other.deinit(allocator);
+    for (40_000..60_000) |i| other.add(try std.fmt.bufPrint(&buf, "user-{d}", .{i}));
+    try hll.merge(other);
+    std.debug.print("after merge (true 60000): {d:.0}\n", .{hll.cardinality()});
 }

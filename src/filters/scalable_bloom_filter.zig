@@ -187,13 +187,13 @@ pub const ScalableBloomFilter = struct {
             .growth = try serde.readInt(r, u32),
             .tightening = try serde.readF64(r),
         };
-        var self = init(allocator, options) catch |err| return toReadError(err);
+        var self = init(allocator, options) catch |err| return serde.fromInitError(err);
         errdefer self.deinit(allocator);
 
         const stage_count = try serde.readInt(r, u32);
         if (stage_count == 0) return error.InvalidData;
         for (0..stage_count) |i| {
-            if (i > 0) self.addStage(allocator) catch |err| return toReadError(err);
+            if (i > 0) self.addStage(allocator) catch |err| return serde.fromInitError(err);
             const stage = &self.stages.items[i];
             stage.count = try serde.readInt(r, u64);
             const k = try serde.readInt(r, u32);
@@ -207,13 +207,6 @@ pub const ScalableBloomFilter = struct {
         return self;
     }
 };
-
-fn toReadError(err: ScalableBloomFilter.InitError) serde.ReadError {
-    return switch (err) {
-        error.InvalidParameters => error.InvalidData,
-        error.OutOfMemory => error.OutOfMemory,
-    };
-}
 
 const testing = std.testing;
 

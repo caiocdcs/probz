@@ -256,10 +256,7 @@ pub fn CuckooFilter(comptime Fingerprint: type, comptime bucket_size: comptime_i
             try serde.readHeader(r, .cuckoo_filter);
             if (try r.takeByte() != fp_bits or try r.takeByte() != bucket_size) return error.InvalidData;
             const buckets = try serde.readInt(r, u64);
-            var self = initBuckets(allocator, buckets, 0) catch |err| return switch (err) {
-                error.InvalidParameters => error.InvalidData,
-                error.OutOfMemory => error.OutOfMemory,
-            };
+            var self = initBuckets(allocator, buckets, 0) catch |err| return serde.fromInitError(err);
             errdefer self.deinit(allocator);
             self.len = try serde.readInt(r, u64);
             self.rng.state = try serde.readInt(r, u64);

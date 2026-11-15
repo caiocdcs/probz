@@ -1,115 +1,138 @@
-//! HyperLogLog is a probabilistic cardinality estimator that uses a fixed
-//! amount of memory to estimate the number of distinct elements in a set.
-//! It provides excellent space efficiency with configurable accuracy.
+//! HyperLogLog: distinct-count estimation in m = 2^p one-byte registers,
+//! with standard error ≈ 1.04 / √m. See SPEC.md §5.6.
 //!
-//! The algorithm uses the first p bits of a hash for bucketing and counts
-//! leading zeros in the remaining bits to estimate cardinality.
+//! Each item's 64-bit hash picks a register from its top p bits; the
+//! register keeps the maximum ρ, the position of the leftmost 1-bit in
+//! the remaining 64 − p bits (1-based, at most 64 − p + 1). The estimate
+//! is the bias-corrected harmonic mean of 2^register (Flajolet et al.,
+//! Figure 3), with linear counting below 5/2·m when some registers are
+//! still zero.
 //!
-//!# References
+//! Because the hash has 64 bits, the original large-range correction for
+//! cardinalities near 2^32 is not needed (Heule et al. §5.1). The
+//! empirical bias tables and sparse representation of HyperLogLog++ are
+//! not implemented.
 //!
-//! - ["HyperLogLog: the analysis of a near-optimal cardinality estimation
-//!   algorithm", Philippe Flajolet, Éric Fusy, Olivier Gandouet and Frédéric
-//!   Meunier.](http://algo.inria.fr/flajolet/Publications/FlFuGaMe07.pdf)
+//! # References
+//!
+//! - Philippe Flajolet, Éric Fusy, Olivier Gandouet, Frédéric Meunier,
+//!   "HyperLogLog: the analysis of a near-optimal cardinality estimation
+//!   algorithm", AofA 2007, DMTCS Proceedings AH:137–156. Figure 3 (the
+//!   program, α_m constants, small-range correction), standard error
+//!   1.04 / √m. https://doi.org/10.46298/dmtcs.3545
+//!   (PDF: https://algo.inria.fr/flajolet/Publications/FlFuGaMe07.pdf)
+//! - Stefan Heule, Marc Nunkesser, Alexander Hall, "HyperLogLog in Practice:
+//!   Algorithmic Engineering of a State of The Art Cardinality Estimation
+//!   Algorithm", EDBT 2013, pp. 683–692. §5.1 (64-bit hash, no large-range
+//!   correction). https://doi.org/10.1145/2452376.2452456
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const hash = std.hash;
 const math = std.math;
+const Allocator = std.mem.Allocator;
 
-pub const HyperLogLogError = error{
-    IncompatiblePrecision,
-    InvalidPrecision,
-};
+const hashing = @import("hash.zig");
+const serde = @import("serde.zig");
 
 pub const HyperLogLog = struct {
-    const Self = @This();
+    /// Index bits p; m = 2^p registers.
+    precision: u5,
+    registers: []u8,
 
-    /// Number of bits used for bucketing (4-16)
-    precision: u8,
-    /// Registers storing maximum leading zero counts
-    buckets: []u6,
-    allocator: Allocator,
+    pub const min_precision = 4;
+    pub const max_precision = 18;
 
-    const MIN_PRECISION: u8 = 4;
-    const MAX_PRECISION: u8 = 16;
+    pub const Options = struct {
+        /// p in [4, 18]. 14 gives m = 16384 registers (16 KiB), error ≈ 0.81%.
+        precision: u5 = 14,
+    };
 
-    /// Return a new HyperLogLog with specified precision.
-    /// Higher precision provides better accuracy but uses more memory.
-    pub fn init(allocator: Allocator, precision: u8) !HyperLogLog {
-        if (precision < MIN_PRECISION or precision > MAX_PRECISION) {
-            return HyperLogLogError.InvalidPrecision;
-        }
+    pub const InitError = error{InvalidParameters} || Allocator.Error;
+    pub const MergeError = error{IncompatiblePrecision};
 
-        const bucket_count = @as(usize, 1) << @intCast(precision);
-        const buckets = try allocator.alloc(u6, bucket_count);
-        @memset(buckets, 0);
-
-        return HyperLogLog{
-            .precision = precision,
-            .buckets = buckets,
-            .allocator = allocator,
-        };
+    pub fn init(allocator: Allocator, options: Options) InitError!HyperLogLog {
+        if (options.precision < min_precision or options.precision > max_precision) return error.InvalidParameters;
+        const registers = try allocator.alloc(u8, @as(usize, 1) << options.precision);
+        @memset(registers, 0);
+        return .{ .precision = options.precision, .registers = registers };
     }
 
-    pub fn deinit(self: *HyperLogLog) void {
-        self.allocator.free(self.buckets);
+    pub fn deinit(self: *HyperLogLog, allocator: Allocator) void {
+        allocator.free(self.registers);
+        self.* = undefined;
     }
 
-    /// Add an element to the HyperLogLog estimator.
     pub fn add(self: *HyperLogLog, item: []const u8) void {
-        const hash_value = hash.XxHash32.hash(0, item);
-
-        // Use leftmost precision bits for bucket index
-        const index = hash_value >> @intCast(32 - self.precision);
-
-        // Shift out index bits and count leading zeros in remaining bits
-        const w = hash_value << @intCast(self.precision);
-        const leading_zeros = @clz(w);
-        const rank = @min(@as(u6, 31), @as(u6, @intCast(leading_zeros + 1)));
-
-        self.buckets[index] = @max(self.buckets[index], rank);
+        self.addHash(hashing.hashBytes(item));
     }
 
-    /// Approximately count number of unique elements in the estimator.
-    pub fn estimatedSize(self: *const HyperLogLog) f64 {
-        const m = @as(f64, @floatFromInt(self.buckets.len));
-        var sum: f64 = 0.0;
+    /// j = h >> (64 − p); ρ = clz((h << p) | 2^(p−1)) + 1.
+    /// The OR'd sentinel bit caps ρ at 64 − p + 1 when the low bits are zero.
+    pub fn addHash(self: *HyperLogLog, h: u64) void {
+        const p: u6 = self.precision;
+        const j: usize = @intCast(h >> @intCast(64 - @as(u7, p)));
+        const w = (h << p) | (@as(u64, 1) << (p - 1));
+        const rho: u8 = @as(u8, @clz(w)) + 1;
+        if (rho > self.registers[j]) self.registers[j] = rho;
+    }
+
+    /// Estimated number of distinct items.
+    pub fn cardinality(self: HyperLogLog) f64 {
+        const m: f64 = @floatFromInt(self.registers.len);
+        var sum: f64 = 0;
         var zeros: usize = 0;
-
-        for (self.buckets) |bucket| {
-            sum += 1.0 / @as(f64, @floatFromInt(@as(u64, 1) << bucket));
-            if (bucket == 0) zeros += 1;
+        for (self.registers) |r| {
+            sum += math.ldexp(@as(f64, 1.0), -@as(i32, r));
+            zeros += @intFromBool(r == 0);
         }
-
-        const alpha_m = getAlpha(self.buckets.len);
-        const raw_estimate = alpha_m * m * m / sum;
-
-        // Apply range corrections
-        const estimate = if (raw_estimate <= 2.5 * m and zeros > 0) // Small range correction (linear counting)
-            m * math.log(f64, math.e, m / @as(f64, @floatFromInt(zeros)))
-        else if (raw_estimate <= (1.0 / 30.0) * math.pow(f64, 2.0, 32.0)) // Intermediate range - use raw estimate
-            raw_estimate
-        else // Large range correction
-            -1 * math.pow(f64, 2.0, 32.0) * math.log(f64, math.e, 1.0 - raw_estimate / math.pow(f64, 2.0, 32.0));
-
-        return @max(0.0, estimate);
+        const raw = alpha(self.registers.len) * m * m / sum;
+        if (raw <= 2.5 * m and zeros > 0) {
+            // Small-range correction: linear counting.
+            return m * @log(m / @as(f64, @floatFromInt(zeros)));
+        }
+        return raw;
     }
 
-    /// Merge another HyperLogLog into this one.
-    /// Both instances must have the same precision.
-    pub fn merge(self: *HyperLogLog, other: *const HyperLogLog) !void {
-        if (self.precision != other.precision) {
-            return HyperLogLogError.IncompatiblePrecision;
-        }
+    /// Relative standard error 1.04 / √m.
+    pub fn standardError(self: HyperLogLog) f64 {
+        return 1.04 / @sqrt(@as(f64, @floatFromInt(self.registers.len)));
+    }
 
-        for (self.buckets, other.buckets) |*bucket, other_bucket| {
-            bucket.* = @max(bucket.*, other_bucket);
-        }
+    /// Union: register-wise maximum. Both must have the same precision.
+    pub fn merge(self: *HyperLogLog, other: HyperLogLog) MergeError!void {
+        if (self.precision != other.precision) return error.IncompatiblePrecision;
+        for (self.registers, other.registers) |*a, b| a.* = @max(a.*, b);
+    }
+
+    pub fn clear(self: *HyperLogLog) void {
+        @memset(self.registers, 0);
+    }
+
+    pub fn memoryBytes(self: HyperLogLog) usize {
+        return self.registers.len;
+    }
+
+    /// Body (tag 6): u8 p, then m register bytes.
+    pub fn serialize(self: HyperLogLog, w: *std.Io.Writer) serde.WriteError!void {
+        try serde.writeHeader(w, .hyperloglog);
+        try w.writeByte(self.precision);
+        try w.writeAll(self.registers);
+    }
+
+    pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!HyperLogLog {
+        try serde.readHeader(r, .hyperloglog);
+        const p = try r.takeByte();
+        if (p < min_precision or p > max_precision) return error.InvalidData;
+        var self = init(allocator, .{ .precision = @intCast(p) }) catch |err| return serde.fromInitError(err);
+        errdefer self.deinit(allocator);
+        try r.readSliceAll(self.registers);
+        const max_rho = 64 - p + 1;
+        for (self.registers) |reg| if (reg > max_rho) return error.InvalidData;
+        return self;
     }
 };
 
-/// Get the alpha constant for bias correction based on bucket count
-inline fn getAlpha(m: usize) f64 {
+/// α_m from Figure 3 of Flajolet et al.
+fn alpha(m: usize) f64 {
     return switch (m) {
         16 => 0.673,
         32 => 0.697,
@@ -120,69 +143,78 @@ inline fn getAlpha(m: usize) f64 {
 
 const testing = std.testing;
 
-test "init" {
-    var hll = try HyperLogLog.init(testing.allocator, 8);
-    defer hll.deinit();
+test "precision bounds" {
+    try testing.expectError(error.InvalidParameters, HyperLogLog.init(testing.allocator, .{ .precision = 3 }));
+    try testing.expectError(error.InvalidParameters, HyperLogLog.init(testing.allocator, .{ .precision = 19 }));
 }
 
-test "invalid precision" {
-    try testing.expectError(HyperLogLogError.InvalidPrecision, HyperLogLog.init(testing.allocator, 3));
-    try testing.expectError(HyperLogLogError.InvalidPrecision, HyperLogLog.init(testing.allocator, 17));
-}
-
-test "empty estimator" {
-    var hll = try HyperLogLog.init(testing.allocator, 8);
-    defer hll.deinit();
-
-    try testing.expectEqual(@as(f64, 0.0), hll.estimatedSize());
-}
-
-test "single item" {
-    var hll = try HyperLogLog.init(testing.allocator, 8);
-    defer hll.deinit();
-
+test "empty and single item" {
+    var hll = try HyperLogLog.init(testing.allocator, .{ .precision = 8 });
+    defer hll.deinit(testing.allocator);
+    try testing.expectEqual(@as(f64, 0), hll.cardinality());
     hll.add("test");
-    const size = hll.estimatedSize();
-
-    try testing.expect(size > 0 and size < 5);
+    hll.add("test");
+    try testing.expectEqual(@as(f64, 1), @round(hll.cardinality()));
 }
 
-test "add and estimated size" {
-    var hll = try HyperLogLog.init(testing.allocator, 10);
-    defer hll.deinit();
+test "rank uses all 64 - p bits" {
+    var hll = try HyperLogLog.init(testing.allocator, .{ .precision = 4 });
+    defer hll.deinit(testing.allocator);
+    // Register 0, all remaining bits zero: maximum rank 64 - 4 + 1 = 61.
+    hll.addHash(0);
+    try testing.expectEqual(@as(u8, 61), hll.registers[0]);
+    // Register 15, first remaining bit set: rank 1.
+    hll.addHash(0xf800_0000_0000_0000);
+    try testing.expectEqual(@as(u8, 1), hll.registers[15]);
+}
+
+test "relative error within 3 standard errors" {
+    var hll = try HyperLogLog.init(testing.allocator, .{ .precision = 12 });
+    defer hll.deinit(testing.allocator);
+    const bound = 3 * hll.standardError();
 
     var buf: [32]u8 = undefined;
-    for (0..100) |i| {
-        const item = try std.fmt.bufPrint(&buf, "item-{d}", .{i});
-        hll.add(item);
+    var n: usize = 0;
+    for ([_]usize{ 100, 1_000, 10_000, 100_000, 1_000_000 }) |target| {
+        while (n < target) : (n += 1) hll.add(try std.fmt.bufPrint(&buf, "item-{d}", .{n}));
+        const est = hll.cardinality();
+        const err = @abs(est - @as(f64, @floatFromInt(n))) / @as(f64, @floatFromInt(n));
+        try testing.expect(err <= bound);
     }
-
-    const size = hll.estimatedSize();
-    try testing.expect(size > 80 and size < 120);
 }
 
-test "merge compatible estimators" {
-    var hll1 = try HyperLogLog.init(testing.allocator, 8);
-    defer hll1.deinit();
+test "merge equals the union" {
+    var a = try HyperLogLog.init(testing.allocator, .{ .precision = 10 });
+    defer a.deinit(testing.allocator);
+    var b = try HyperLogLog.init(testing.allocator, .{ .precision = 10 });
+    defer b.deinit(testing.allocator);
+    var all = try HyperLogLog.init(testing.allocator, .{ .precision = 10 });
+    defer all.deinit(testing.allocator);
 
-    var hll2 = try HyperLogLog.init(testing.allocator, 8);
-    defer hll2.deinit();
+    var buf: [32]u8 = undefined;
+    for (0..3000) |i| {
+        const item = try std.fmt.bufPrint(&buf, "item-{d}", .{i});
+        if (i < 2000) a.add(item);
+        if (i >= 1000) b.add(item);
+        all.add(item);
+    }
+    try a.merge(b);
+    try testing.expectEqualSlices(u8, all.registers, a.registers);
 
-    hll1.add("item1");
-    hll2.add("item2");
-
-    try hll1.merge(&hll2);
-    const size = hll1.estimatedSize();
-
-    try testing.expect(size > 0);
+    var c = try HyperLogLog.init(testing.allocator, .{ .precision = 8 });
+    defer c.deinit(testing.allocator);
+    try testing.expectError(error.IncompatiblePrecision, a.merge(c));
 }
 
-test "merge incompatible precision" {
-    var hll1 = try HyperLogLog.init(testing.allocator, 8);
-    defer hll1.deinit();
-
-    var hll2 = try HyperLogLog.init(testing.allocator, 10);
-    defer hll2.deinit();
-
-    try testing.expectError(HyperLogLogError.IncompatiblePrecision, hll1.merge(&hll2));
+test "serialize round trip" {
+    var hll = try HyperLogLog.init(testing.allocator, .{ .precision = 6 });
+    defer hll.deinit(testing.allocator);
+    hll.add("x");
+    const bytes = try serde.toOwnedBytes(testing.allocator, hll);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqual(@as(usize, 6 + 1 + 64), bytes.len);
+    var r: std.Io.Reader = .fixed(bytes);
+    var back = try HyperLogLog.deserialize(testing.allocator, &r);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, hll.registers, back.registers);
 }

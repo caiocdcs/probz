@@ -9,5 +9,6 @@ pub const entries = [_]Entry{
     .{ .name = "scalable_bloom_filter", .json = @embedFile("vectors/scalable_bloom_filter.json") },
     .{ .name = "cuckoo_filter", .json = @embedFile("vectors/cuckoo_filter.json") },
     .{ .name = "quotient_filter", .json = @embedFile("vectors/quotient_filter.json") },
+    .{ .name = "hyperloglog", .json = @embedFile("vectors/hyperloglog.json") },
     .{ .name = "splitmix64", .json = @embedFile("vectors/splitmix64.json") },
 };

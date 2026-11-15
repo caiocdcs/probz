@@ -386,10 +386,7 @@ pub fn QuotientFilter(comptime r_bits: u16) type {
             try serde.readHeader(r, .quotient_filter);
             const q = try r.takeByte();
             if (q == 0 or q > 63 or try r.takeByte() != r_bits) return error.InvalidData;
-            var self = init(allocator, .{ .q = @intCast(q) }) catch |err| return switch (err) {
-                error.InvalidParameters => error.InvalidData,
-                error.OutOfMemory => error.OutOfMemory,
-            };
+            var self = init(allocator, .{ .q = @intCast(q) }) catch |err| return serde.fromInitError(err);
             errdefer self.deinit(allocator);
             self.len = try serde.readInt(r, u64);
             for (self.remainders) |*rem| rem.* = math.cast(Remainder, try serde.readInt(r, Wire)) orelse return error.InvalidData;
