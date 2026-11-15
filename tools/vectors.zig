@@ -24,6 +24,7 @@ pub const Case = struct {
 pub const cases = [_]Case{
     .{ .name = "hash", .generate = genHash },
     .{ .name = "bloom_filter", .generate = genBloom },
+    .{ .name = "counting_bloom_filter", .generate = genCountingBloom },
 };
 
 /// "item-{i}" for i in [0, n).
@@ -105,6 +106,30 @@ fn genBloom(arena: Allocator) anyerror![]const u8 {
         .set_bits = bf.bits.countSet(),
         .estimated_items = bf.estimatedItems(),
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, bf)),
+    });
+}
+
+fn genCountingBloom(arena: Allocator) anyerror![]const u8 {
+    // Small 4-bit filter so the serialized body stays short.
+    var cbf = try probz.DefaultCountingBloomFilter.init(arena, .{ .expected_items = 50, .fp_rate = 0.01 });
+    const items = try inputs(arena, 100);
+    // item-i is added (i % 3) + 1 times for i < 50, then item-0..item-9 are removed once.
+    for (items[0..50], 0..) |item, i| {
+        for (0..(i % 3) + 1) |_| cbf.add(item);
+    }
+    for (items[0..10]) |item| _ = cbf.remove(item);
+
+    const counts = try arena.alloc(u8, items.len);
+    for (items, counts) |item, *c| c.* = cbf.count(item);
+
+    return toJson(arena, .{
+        .description = "Counting Bloom filter, u4 counters (SPEC.md §5.2): init(expected_items=50, fp_rate=0.01); add item-i ((i mod 3)+1) times for i < 50; remove item-0..item-9 once; count(item-0..item-99)",
+        .params = .{ .expected_items = 50, .fp_rate = 0.01, .counter_bits = 4 },
+        .cell_count = cbf.cellCount(),
+        .hash_count = cbf.k,
+        .counts = counts,
+        .non_zero = cbf.nonZeroCount(),
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cbf)),
     });
 }
 

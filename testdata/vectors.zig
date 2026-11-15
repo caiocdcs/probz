@@ -5,4 +5,5 @@ pub const Entry = struct { name: []const u8, json: []const u8 };
 pub const entries = [_]Entry{
     .{ .name = "hash", .json = @embedFile("vectors/hash.json") },
     .{ .name = "bloom_filter", .json = @embedFile("vectors/bloom_filter.json") },
+    .{ .name = "counting_bloom_filter", .json = @embedFile("vectors/counting_bloom_filter.json") },
 };

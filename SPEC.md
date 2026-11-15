@@ -194,3 +194,41 @@ or +∞ if X = m.
   <https://doi.org/10.1021/ci600526a>
 
 Vector: `testdata/vectors/bloom_filter.json`.
+
+### 5.2 Counting Bloom filter (tag 2)
+
+**Parameters.** Same as the Bloom filter (§5.1): m cells and k hashes,
+plus a counter width w of 2–32 bits (default 4).
+
+**Add.** Increment the k counters `g_0 … g_{k-1}` (§2.2). A counter at
+`2^w - 1` stays there (saturates).
+
+**Contains / count.** `count(item)` is the minimum of its k counters, and
+`contains` is `count > 0`.
+
+**Remove.** If `count(item) == 0`, return false and change nothing.
+Otherwise decrement every one of the k counters that is not saturated,
+and return true. Never decrementing a saturated counter rules out the
+false negatives that Fan et al. warn about.
+
+**Estimated items.** As §5.1, with X = the number of non-zero counters.
+
+**Merge.** Requires equal m, k, and w: per-cell saturating addition.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| w | u8 |
+| k | u32 |
+| m | u64 |
+| counters | m × (ceil(w / 8)-byte little-endian unsigned) |
+
+**References.**
+- Li Fan, Pei Cao, Jussara Almeida, Andrei Z. Broder, "Summary Cache: A
+  Scalable Wide-Area Web Cache Sharing Protocol", IEEE/ACM Transactions on
+  Networking 8(3):281–293, 2000, section "Bloom Filters—the Math".
+  <https://doi.org/10.1109/90.851975> (online version:
+  <https://pages.cs.wisc.edu/~cao/papers/summary-cache/node8.html>)
+
+Vector: `testdata/vectors/counting_bloom_filter.json`.

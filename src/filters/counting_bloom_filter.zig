@@ -1,252 +1,286 @@
-//! Counting Bloom filter is a variant of the classical Bloom filter that supports
-//! both insertions and deletions. Instead of using single bits, it uses counters
-//! for each position, allowing items to be deleted without affecting other items.
-//! When an item is seted, counters are incremented; when deleted, they are decremented.
-//! This eliminates the false negative problem of trying to delete from a standard bloom filter.
+//! Counting Bloom filter: a Bloom filter whose cells are small counters,
+//! so items can be removed. See SPEC.md §5.2.
+//!
+//! Sizing and index derivation are identical to `BloomFilter` (m cells,
+//! k positions via double hashing). `add` increments the k counters and
+//! `remove` decrements them.
+//!
+//! Overflow: Fan et al. use 4-bit counters and let a counter that would
+//! exceed its maximum stay at the maximum. They note that decrementing
+//! such a counter later can produce false negatives. This implementation
+//! saturates the same way and additionally never decrements a saturated
+//! counter, so false negatives cannot occur. The cost is that saturated
+//! cells stay set permanently.
+//!
+//! `remove` must only be called for items that were added. Removing a
+//! false-positive item decrements counters that belong to other items and
+//! can cause false negatives. This holds for any counting Bloom filter.
+//!
+//! # References
+//!
+//! - Li Fan, Pei Cao, Jussara Almeida, Andrei Z. Broder, "Summary Cache: A
+//!   Scalable Wide-Area Web Cache Sharing Protocol", IEEE/ACM Transactions
+//!   on Networking 8(3):281–293, 2000, section "Bloom Filters—the Math"
+//!   (counting filters, 4-bit counters, overflow handling).
+//!   https://doi.org/10.1109/90.851975
+//!   (online version: https://pages.cs.wisc.edu/~cao/papers/summary-cache/node8.html)
+//! - Sizing and double hashing: see `bloom_filter.zig`.
+
 const std = @import("std");
-const hash = std.hash;
 const math = std.math;
-
 const Allocator = std.mem.Allocator;
-const CountingBitArray = @import("counting_bit_array.zig").CountingBitArray;
-const DefaultCountingBitArray = @import("counting_bit_array.zig").DefaultCountingBitArray;
 
-pub const CountingBloomFilterError = error{
-    CounterUnderflow,
-} || @import("counting_bit_array.zig").CountingBitArrayError;
+const bloom = @import("bloom_filter.zig");
+const hashing = @import("../hash.zig");
+const serde = @import("../serde.zig");
 
-/// Hash pair for double hashing optimization
-const HashPair = struct {
-    hash1: u32,
-    hash2: u32,
-};
+/// Counting Bloom filter with 4-bit counters, as recommended by Fan et al.
+pub const DefaultCountingBloomFilter = CountingBloomFilter(u4);
 
-/// CounterType must be a unsigned int type, it builds a bloom filter with this type as the counter type for each bit/bucket.
-/// In the future, we could use zig comptime to do a check and ensure this type is appropriate for this filter
-pub fn CountingBloomFilter(comptime CounterType: type) type {
+/// `Counter` must be an unsigned integer of 2 to 32 bits.
+pub fn CountingBloomFilter(comptime Counter: type) type {
+    const info = @typeInfo(Counter);
+    if (info != .int or info.int.signedness != .unsigned or info.int.bits < 2 or info.int.bits > 32)
+        @compileError("CountingBloomFilter: Counter must be an unsigned integer of 2..32 bits");
+
     return struct {
         const Self = @This();
+        const max = math.maxInt(Counter);
+        /// Bytes per counter on the wire.
+        const wire_bytes = (info.int.bits + 7) / 8;
+        const Wire = std.meta.Int(.unsigned, wire_bytes * 8);
 
-        /// number of hash functions
-        k: u8,
-        /// counting bit array to track occurrences
-        counting_array: CountingBitArray(CounterType),
+        counters: []Counter,
+        /// Number of hash functions.
+        k: u32,
 
-        /// Return a new Counting Bloom filter with a given number of expected entries
-        /// and a desired false positive rate.
-        pub fn init(allocator: Allocator, expected_entries: u64, fp_rate: f64) !Self {
-            const m = calculateM(expected_entries, fp_rate);
-            const k = calculateK(m, expected_entries);
+        pub const Options = bloom.BloomFilter.Options;
+        pub const InitError = bloom.BloomFilter.InitError;
+        pub const MergeError = bloom.BloomFilter.MergeError;
 
-            const counting_array = try CountingBitArray(CounterType).init(allocator, m);
-
-            return Self{
-                .k = @truncate(k),
-                .counting_array = counting_array,
-            };
+        pub fn init(allocator: Allocator, options: Options) InitError!Self {
+            const m = try bloom.optimalBits(options.expected_items, options.fp_rate);
+            return initExact(allocator, m, bloom.optimalHashes(m, options.expected_items));
         }
 
-        pub fn deinit(self: *Self) void {
-            self.counting_array.deinit();
+        /// Exactly `cell_count` counters and `hash_count` hashes.
+        pub fn initExact(allocator: Allocator, cell_count: u64, hash_count: u32) InitError!Self {
+            if (cell_count == 0 or hash_count == 0) return error.InvalidParameters;
+            const len = math.cast(usize, cell_count) orelse return error.OutOfMemory;
+            const counters = try allocator.alloc(Counter, len);
+            @memset(counters, 0);
+            return .{ .counters = counters, .k = hash_count };
         }
 
-        /// Add an item to the Counting Bloom filter.
-        pub fn set(self: *Self, item: []const u8) CountingBloomFilterError!void {
-            const hashes = computeHashes(item);
+        pub fn deinit(self: *Self, allocator: Allocator) void {
+            allocator.free(self.counters);
+            self.* = undefined;
+        }
 
+        pub fn add(self: *Self, item: []const u8) void {
+            self.addHash(hashing.hashBytes(item));
+        }
+
+        /// Increment the k counters; counters at the maximum stay there.
+        pub fn addHash(self: *Self, h: u64) void {
+            const pair = hashing.HashPair.fromHash(h);
             for (0..self.k) |i| {
-                const idx = self.calculateIndex(&hashes, @truncate(i));
-                try self.counting_array.increment(idx);
+                const c = &self.counters[self.index(pair, i)];
+                if (c.* != max) c.* += 1;
             }
         }
 
-        /// Remove an item from the Counting Bloom filter.
-        /// Returns true if the item was found and removed, false otherwise.
+        pub fn contains(self: Self, item: []const u8) bool {
+            return self.containsHash(hashing.hashBytes(item));
+        }
+
+        pub fn containsHash(self: Self, h: u64) bool {
+            return self.countHash(h) > 0;
+        }
+
+        /// Upper bound on how many times the item was added: the minimum of
+        /// its k counters (saturated counters report the maximum).
+        pub fn count(self: Self, item: []const u8) Counter {
+            return self.countHash(hashing.hashBytes(item));
+        }
+
+        pub fn countHash(self: Self, h: u64) Counter {
+            const pair = hashing.HashPair.fromHash(h);
+            var min: Counter = max;
+            for (0..self.k) |i| min = @min(min, self.counters[self.index(pair, i)]);
+            return min;
+        }
+
+        /// Remove one occurrence. Returns false (and changes nothing) if the
+        /// item is definitely not present. Saturated counters are left
+        /// unchanged.
         pub fn remove(self: *Self, item: []const u8) bool {
-            const hashes = computeHashes(item);
+            return self.removeHash(hashing.hashBytes(item));
+        }
 
-            // Check if item exists before removing
-            if (!self.has(item)) {
-                return false;
-            }
-
+        pub fn removeHash(self: *Self, h: u64) bool {
+            if (!self.containsHash(h)) return false;
+            const pair = hashing.HashPair.fromHash(h);
             for (0..self.k) |i| {
-                const idx = self.calculateIndex(&hashes, @truncate(i));
-                self.counting_array.decrementUnchecked(idx);
+                const c = &self.counters[self.index(pair, i)];
+                if (c.* != max) c.* -= 1;
             }
             return true;
         }
 
-        /// Remove an item with automatic safety checking.
-        /// Returns `CounterUnderflow` if item doesn't exist in the filter.
-        pub fn removeSafe(self: *Self, item: []const u8) CountingBloomFilterError!void {
-            const hashes = computeHashes(item);
-
-            // Check if removal is safe for all positions
-            for (0..self.k) |i| {
-                const idx = self.calculateIndex(&hashes, @truncate(i));
-                const counter = self.counting_array.get(idx) catch 0;
-                if (counter == 0) {
-                    return CountingBloomFilterError.CounterUnderflow;
-                }
-            }
-
-            // Perform the removal
-            for (0..self.k) |i| {
-                const idx = self.calculateIndex(&hashes, @truncate(i));
-                try self.counting_array.decrement(idx);
-            }
+        /// Estimated number of distinct items, from the number of non-zero
+        /// counters (same estimator as `BloomFilter.estimatedItems`).
+        pub fn estimatedItems(self: Self) f64 {
+            const m: f64 = @floatFromInt(self.counters.len);
+            const k: f64 = @floatFromInt(self.k);
+            const x: f64 = @floatFromInt(self.nonZeroCount());
+            if (x >= m) return math.inf(f64);
+            return -(m / k) * @log(1.0 - x / m);
         }
 
-        /// Check if an item might be in the filter.
-        /// May return false positives but never false negatives.
-        /// Also indicates if the item can be safely removed.
-        pub fn has(self: *const Self, item: []const u8) bool {
-            const hashes = computeHashes(item);
-
-            for (0..self.k) |i| {
-                const idx = self.calculateIndex(&hashes, @truncate(i));
-                const is_set = self.counting_array.isSet(idx) catch false;
-                if (!is_set) {
-                    return false;
-                }
-            }
-            return true;
+        pub fn nonZeroCount(self: Self) usize {
+            var n: usize = 0;
+            for (self.counters) |c| n += @intFromBool(c != 0);
+            return n;
         }
 
-        /// Estimate the number of unique elements in the filter.
-        /// Runs in O(m) where m is the counter array length.
-        pub fn estimatedSize(self: *const Self) u64 {
-            const m = @as(f64, @floatFromInt(self.counting_array.length));
-            const k = @as(f64, @floatFromInt(self.k));
-            const l = @as(f64, @floatFromInt(self.counting_array.countNonZero()));
-
-            if (l == 0) return 0;
-            return @intFromFloat(-(m / k) * math.log(f64, math.e, (1.0 - l / m)));
+        /// Multiset union: adds counters (saturating). Both filters must
+        /// have the same cell count and hash count.
+        pub fn merge(self: *Self, other: Self) MergeError!void {
+            if (self.counters.len != other.counters.len or self.k != other.k) return error.IncompatibleFilters;
+            for (self.counters, other.counters) |*a, b| a.* +|= b;
         }
 
-        /// Calculate array index using double hashing: h1(x) + i * h2(x) mod m.
-        /// Reduces hash computations from k to 2 per operation.
-        pub inline fn calculateIndex(self: *const Self, hash_pair: *const HashPair, i: u32) u64 {
-            const combined = @as(u64, hash_pair.hash1) +% (@as(u64, i) *% @as(u64, hash_pair.hash2));
-            return combined % self.counting_array.length;
+        pub fn clear(self: *Self) void {
+            @memset(self.counters, 0);
+        }
+
+        pub fn cellCount(self: Self) u64 {
+            return self.counters.len;
+        }
+
+        pub fn memoryBytes(self: Self) usize {
+            return self.counters.len * @sizeOf(Counter);
+        }
+
+        /// Body (tag 2): u8 counter bits, u32 k, u64 m, then m counters, each
+        /// little-endian in ceil(bits / 8) bytes.
+        pub fn serialize(self: Self, w: *std.Io.Writer) serde.WriteError!void {
+            try serde.writeHeader(w, .counting_bloom_filter);
+            try w.writeByte(info.int.bits);
+            try serde.writeInt(w, u32, self.k);
+            try serde.writeInt(w, u64, self.counters.len);
+            for (self.counters) |c| try serde.writeInt(w, Wire, c);
+        }
+
+        pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!Self {
+            try serde.readHeader(r, .counting_bloom_filter);
+            if (try r.takeByte() != info.int.bits) return error.InvalidData;
+            const k = try serde.readInt(r, u32);
+            const m = math.cast(usize, try serde.readInt(r, u64)) orelse return error.InvalidData;
+            if (k == 0 or m == 0) return error.InvalidData;
+            const counters = try allocator.alloc(Counter, m);
+            errdefer allocator.free(counters);
+            for (counters) |*c| c.* = math.cast(Counter, try serde.readInt(r, Wire)) orelse return error.InvalidData;
+            return .{ .counters = counters, .k = k };
+        }
+
+        inline fn index(self: Self, pair: hashing.HashPair, i: usize) usize {
+            return @intCast(pair.index(@intCast(i), self.counters.len));
         }
     };
 }
 
-/// Default Counting Bloom Filter with 4-bit counters.
-pub const DefaultCountingBloomFilter = CountingBloomFilter(u4);
-
-/// Uses the formula: m = ceil((n * log(p)) / log(1 / pow(2, log(2))));
-fn calculateM(expected_entries: u64, fp_rate: f64) u64 {
-    const numerator = @as(f64, @floatFromInt(expected_entries)) * -math.log(f64, math.e, fp_rate);
-    const denominator = math.pow(f64, math.log(f64, math.e, 2), 2);
-    return @intFromFloat(math.ceil(numerator / denominator));
-}
-
-/// Uses the formula: k = round((m / n) * log(2));
-fn calculateK(length: u64, expected_entries: u64) u64 {
-    const operand = @as(f64, @floatFromInt(length)) / @as(f64, @floatFromInt(expected_entries));
-    const k = operand * math.log(f64, math.e, 2);
-    return @intFromFloat(math.round(k));
-}
-
-/// Compute hash pair for double hashing to avoid calculating k hash functions.
-inline fn computeHashes(item: []const u8) HashPair {
-    const hash1 = hash.Murmur3_32.hash(item);
-    const hash2 = hash.XxHash32.hash(hash1, item);
-    return HashPair{ .hash1 = hash1, .hash2 = hash2 };
-}
-
 const testing = std.testing;
 
-test "calculate optimal M num of bits" {
-    try testing.expectEqual(calculateM(4000, 1.0e-7), 134191);
+test "add, contains, remove" {
+    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, .{ .expected_items = 100 });
+    defer cbf.deinit(testing.allocator);
+
+    try testing.expect(!cbf.contains("test"));
+    cbf.add("test");
+    try testing.expect(cbf.contains("test"));
+    try testing.expect(cbf.remove("test"));
+    try testing.expect(!cbf.contains("test"));
+    try testing.expect(!cbf.remove("test"));
 }
 
-test "calculate optimal k hash functions" {
-    try testing.expectEqual(23, calculateK(134191, 4000));
-}
+test "multiplicity" {
+    var cbf = try CountingBloomFilter(u8).init(testing.allocator, .{ .expected_items = 100 });
+    defer cbf.deinit(testing.allocator);
 
-test "init default counting bloom filter" {
-    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
-    defer cbf.deinit();
-}
-
-test "init with custom counter type" {
-    var cbf = try CountingBloomFilter(u8).init(testing.allocator, 100, 0.01);
-    defer cbf.deinit();
-}
-
-test "set and has" {
-    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
-    defer cbf.deinit();
-
-    try testing.expectEqual(false, cbf.has("test"));
-    try cbf.set("test");
-    try testing.expect(cbf.has("test"));
-}
-
-test "set, remove and has" {
-    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
-    defer cbf.deinit();
-
-    try cbf.set("test");
-    try testing.expect(cbf.has("test"));
-
+    cbf.add("test");
+    cbf.add("test");
+    try testing.expectEqual(@as(u8, 2), cbf.count("test"));
     _ = cbf.remove("test");
-    try testing.expectEqual(false, cbf.has("test"));
-}
-
-test "multiple sets and single remove" {
-    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
-    defer cbf.deinit();
-
-    try cbf.set("test");
-    try cbf.set("test");
-    try testing.expect(cbf.has("test"));
-
+    try testing.expect(cbf.contains("test"));
     _ = cbf.remove("test");
-    try testing.expect(cbf.has("test"));
-
-    _ = cbf.remove("test");
-    try testing.expectEqual(false, cbf.has("test"));
+    try testing.expect(!cbf.contains("test"));
 }
 
-test "removeSafe from empty filter" {
-    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
-    defer cbf.deinit();
+test "remove keeps other items" {
+    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, .{ .expected_items = 1000 });
+    defer cbf.deinit(testing.allocator);
 
-    try testing.expectError(CountingBloomFilterError.CounterUnderflow, cbf.removeSafe("test"));
+    var buf: [32]u8 = undefined;
+    for (0..1000) |i| cbf.add(try std.fmt.bufPrint(&buf, "item-{d}", .{i}));
+    for (0..500) |i| try testing.expect(cbf.remove(try std.fmt.bufPrint(&buf, "item-{d}", .{i})));
+    for (500..1000) |i| try testing.expect(cbf.contains(try std.fmt.bufPrint(&buf, "item-{d}", .{i})));
 }
 
-test "estimated size" {
-    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
-    defer cbf.deinit();
-
-    try cbf.set("test1");
-    try cbf.set("test2");
-    try cbf.set("test3");
-
-    const estimated = cbf.estimatedSize();
-    try testing.expectEqual(3, estimated);
+test "saturated counters never cause false negatives" {
+    // 2-bit counters saturate at 3; add "a" 5 times and "b" once.
+    var cbf = try CountingBloomFilter(u2).initExact(testing.allocator, 64, 3);
+    defer cbf.deinit(testing.allocator);
+    for (0..5) |_| cbf.add("a");
+    cbf.add("b");
+    try testing.expectEqual(@as(u2, 3), cbf.count("a"));
+    // Removing "a" five times must never drop "b".
+    for (0..5) |_| _ = cbf.remove("a");
+    try testing.expect(cbf.contains("b"));
 }
 
-test "different items" {
-    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, 100, 0.01);
-    defer cbf.deinit();
+test "estimated items" {
+    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, .{ .expected_items = 100 });
+    defer cbf.deinit(testing.allocator);
+    try testing.expectEqual(@as(f64, 0), cbf.estimatedItems());
+    cbf.add("test1");
+    cbf.add("test2");
+    cbf.add("test3");
+    try testing.expectEqual(@as(f64, 3), @round(cbf.estimatedItems()));
+}
 
-    try cbf.set("test1");
-    try cbf.set("test2");
+test "merge" {
+    var a = try DefaultCountingBloomFilter.init(testing.allocator, .{ .expected_items = 100 });
+    defer a.deinit(testing.allocator);
+    var b = try DefaultCountingBloomFilter.init(testing.allocator, .{ .expected_items = 100 });
+    defer b.deinit(testing.allocator);
+    a.add("x");
+    b.add("x");
+    b.add("y");
+    try a.merge(b);
+    try testing.expectEqual(@as(u4, 2), a.count("x"));
+    try testing.expect(a.contains("y"));
 
-    try testing.expect(cbf.has("test1"));
-    try testing.expect(cbf.has("test2"));
-    try testing.expectEqual(false, cbf.has("test3"));
+    var c = try DefaultCountingBloomFilter.init(testing.allocator, .{ .expected_items = 10 });
+    defer c.deinit(testing.allocator);
+    try testing.expectError(error.IncompatibleFilters, a.merge(c));
+}
 
-    try testing.expect(cbf.remove("test1"));
-    try testing.expectEqual(false, cbf.has("test1"));
-    try testing.expect(cbf.has("test2"));
+test "serialize round trip" {
+    var cbf = try DefaultCountingBloomFilter.init(testing.allocator, .{ .expected_items = 50 });
+    defer cbf.deinit(testing.allocator);
+    cbf.add("x");
+    cbf.add("x");
 
-    // Test removing non-existent item
-    try testing.expectEqual(false, cbf.remove("nonexistent"));
+    const bytes = try serde.toOwnedBytes(testing.allocator, cbf);
+    defer testing.allocator.free(bytes);
+    var r: std.Io.Reader = .fixed(bytes);
+    var back = try DefaultCountingBloomFilter.deserialize(testing.allocator, &r);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqualSlices(u4, cbf.counters, back.counters);
+
+    // A filter with a different counter width must be rejected.
+    r = .fixed(bytes);
+    try testing.expectError(error.InvalidData, CountingBloomFilter(u8).deserialize(testing.allocator, &r));
 }
