@@ -137,23 +137,21 @@ single-threaded, on one machine, so treat the numbers as indicative only.
 
 `CountingBloomFilter` packs its counters: 16 `u4` counters per 64-bit word.
 
-The second part of the output uses the setup of
-[nalgeon/unsure](https://github.com/nalgeon/unsure)'s Go benchmarks
-(16-byte keys, hashing included), so the two can be compared on one machine.
-Both on the same M4, in ns/op:
+The second part of the output hashes 16-byte keys on every operation and
+varies the size, following the benchmark setup of
+[nalgeon/unsure](https://github.com/nalgeon/unsure) and the
+[article](https://antonz.org/probabilistic-data-structures/) that accompanies
+it. Selected rows, in ns/op:
 
-| | probz | unsure |
-|---|--:|--:|
-| Bloom 1%, 1M: add / hit / miss (blocked) | 5.0 / 5.0 / 5.0 | 6.1 / 5.8 / 5.6 |
-| Bloom 1%, 50M: add / hit / miss (blocked) | 16.5 / 17.2 / 17.1 | 26.7 / 25.6 / 26.8 |
-| Bloom 1%, 1M: add / hit / miss (classic) | 7.4 / 7.8 / 20.7 | |
-| Count-Min ε = 1e-3: add / count | 6.3 / 5.6 | 10.3 / 5.6 |
-| Count-Min ε = 1e-6: add / count | 22.3 / 19.6 | 51.3 / 36.2 |
-| HyperLogLog p = 14: add / count / merge | 1.4 / 29 / 667 | 3.7 / 33 / 1280 |
-| t-digest δ = 100: add / quantile / merge | 40 / 6.5 / 765 | 38 / 8.4 / 363 |
-
-unsure's Count-Min always uses conservative update. probz's conservative
-mode costs 0.6–4.6 ns more per add.
+| | add | hit / query | miss |
+|---|--:|--:|--:|
+| BloomFilter 1%, 1M | 7.4 | 7.8 | 20.7 |
+| BlockedBloomFilter 1%, 1M | 5.0 | 5.0 | 5.0 |
+| BloomFilter 1%, 50M | 31.8 | 30.3 | 36.0 |
+| BlockedBloomFilter 1%, 50M | 16.5 | 17.2 | 17.1 |
+| CountMinSketch ε = 1e-3 (standard / conservative) | 6.3 / 6.9 | 5.6 | |
+| HyperLogLog p = 14 (count, merge) | 1.4 | 29, 667 | |
+| TDigest δ = 100 (quantile, merge) | 40 | 6.5, 765 | |
 
 ## Other languages
 

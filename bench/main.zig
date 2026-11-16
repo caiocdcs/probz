@@ -229,7 +229,7 @@ fn normals(gpa: std.mem.Allocator, seed: u64, count: usize) ![]f64 {
 }
 
 fn comparable(gpa: std.mem.Allocator, sink: *u64) !void {
-    std.debug.print("\nComparable to nalgeon/unsure (16-byte keys, hashing included)\n\n", .{});
+    std.debug.print("\n16-byte keys, hashing included\n\n", .{});
 
     const keys1 = try makeKeys(gpa, 1, cycle);
     defer gpa.free(keys1);
