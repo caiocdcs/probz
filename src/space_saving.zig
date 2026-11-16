@@ -20,6 +20,13 @@
 //! a global update counter at the entry's last change. This makes results
 //! identical across implementations.
 //!
+//! Entries are kept in the paper's Stream-Summary structure (§3.2): a
+//! list of buckets in ascending count order, each holding its entries in
+//! ascending sequence order. A unit increment moves an entry to the tail of
+//! the next bucket and an eviction takes the head of the first bucket, both
+//! in O(1). An increment by w > 1 walks forward over the buckets with
+//! counts below the new count.
+//!
 //! # References
 //!
 //! - Ahmed Metwally, Divyakant Agrawal, Amr El Abbadi, "Efficient
@@ -34,11 +41,15 @@ const Allocator = std.mem.Allocator;
 
 const serde = @import("serde.zig");
 
+const nil = math.maxInt(u32);
+
 pub const SpaceSaving = struct {
     capacity: u32,
     entries: std.ArrayList(Entry),
-    /// Min-heap of entry indexes, ordered by (count, seq).
-    heap: std.ArrayList(u32),
+    /// Bucket pool; `first_bucket` heads the list in ascending count order.
+    buckets: std.ArrayList(Bucket),
+    first_bucket: u32 = nil,
+    free_bucket: u32 = nil,
     /// key -> entry index
     index: std.StringHashMapUnmanaged(u32),
     /// N
@@ -56,8 +67,20 @@ pub const SpaceSaving = struct {
         /// Maximum over-estimation: count − error ≤ true count.
         err: u64,
         seq: u64,
-        /// Position of this entry in `heap`.
-        heap_pos: u32,
+        /// Neighbours within the bucket (ascending seq) and the bucket.
+        prev: u32 = nil,
+        next: u32 = nil,
+        bucket: u32 = nil,
+    };
+
+    /// All entries with one count, oldest (smallest seq) at `head`.
+    const Bucket = struct {
+        count: u64,
+        head: u32,
+        tail: u32,
+        prev: u32,
+        /// Next bucket (larger count), or the next free bucket.
+        next: u32,
     };
 
     /// One row of a top-k answer. `key` points into the summary and is
@@ -87,14 +110,15 @@ pub const SpaceSaving = struct {
         var self: SpaceSaving = .{
             .capacity = options.capacity,
             .entries = .empty,
-            .heap = .empty,
+            .buckets = .empty,
             .index = .empty,
             .total = 0,
             .seq = 0,
         };
         errdefer self.deinit(allocator);
         try self.entries.ensureTotalCapacity(allocator, options.capacity);
-        try self.heap.ensureTotalCapacity(allocator, options.capacity);
+        // One bucket per distinct count, plus one while an entry moves.
+        try self.buckets.ensureTotalCapacity(allocator, @as(usize, options.capacity) + 1);
         try self.index.ensureTotalCapacity(allocator, options.capacity);
         return self;
     }
@@ -102,7 +126,7 @@ pub const SpaceSaving = struct {
     pub fn deinit(self: *SpaceSaving, allocator: Allocator) void {
         for (self.entries.items) |e| allocator.free(e.key);
         self.entries.deinit(allocator);
-        self.heap.deinit(allocator);
+        self.buckets.deinit(allocator);
         self.index.deinit(allocator);
         self.* = undefined;
     }
@@ -115,22 +139,21 @@ pub const SpaceSaving = struct {
 
         if (self.index.get(item)) |i| {
             const e = &self.entries.items[i];
-            e.count = math.add(u64, e.count, amount) catch return error.Overflow;
+            const new_count = math.add(u64, e.count, amount) catch return error.Overflow;
             self.seq += 1;
             e.seq = self.seq;
-            self.siftDown(e.heap_pos);
+            self.moveTo(i, new_count);
         } else if (self.entries.items.len < self.capacity) {
             const key = try allocator.dupe(u8, item);
             errdefer allocator.free(key);
             const i: u32 = @intCast(self.entries.items.len);
             self.seq += 1;
-            self.entries.appendAssumeCapacity(.{ .key = key, .count = amount, .err = 0, .seq = self.seq, .heap_pos = i });
-            self.heap.appendAssumeCapacity(i);
+            self.entries.appendAssumeCapacity(.{ .key = key, .count = amount, .err = 0, .seq = self.seq });
             self.index.putAssumeCapacity(key, i);
-            self.siftUp(i);
+            self.attach(i, self.findBucket(nil, amount));
         } else {
-            // Replacement step: evict the minimum.
-            const i = self.heap.items[0];
+            // Replacement step: evict the oldest entry with the minimum count.
+            const i = self.buckets.items[self.first_bucket].head;
             const e = &self.entries.items[i];
             const min = e.count;
             const new_count = math.add(u64, min, amount) catch return error.Overflow;
@@ -148,11 +171,10 @@ pub const SpaceSaving = struct {
             // Assign fields one by one: a struct literal assigned to `e.*`
             // would overwrite `e.count` before reading it.
             e.key = key;
-            e.count = new_count;
             e.err = min;
             e.seq = self.seq;
             self.index.putAssumeCapacity(key, i);
-            self.siftDown(0);
+            self.moveTo(i, new_count);
         }
         self.total = new_total;
     }
@@ -174,7 +196,7 @@ pub const SpaceSaving = struct {
     /// The smallest counter once all m counters are in use, else 0.
     pub fn minCount(self: SpaceSaving) u64 {
         if (self.entries.items.len < self.capacity) return 0;
-        return self.entries.items[self.heap.items[0]].count;
+        return self.buckets.items[self.first_bucket].count;
     }
 
     /// The k entries with the largest counts, sorted by count descending,
@@ -202,52 +224,76 @@ pub const SpaceSaving = struct {
     pub fn clear(self: *SpaceSaving, allocator: Allocator) void {
         for (self.entries.items) |e| allocator.free(e.key);
         self.entries.clearRetainingCapacity();
-        self.heap.clearRetainingCapacity();
+        self.buckets.clearRetainingCapacity();
+        self.first_bucket = nil;
+        self.free_bucket = nil;
         self.index.clearRetainingCapacity();
         self.total = 0;
         self.seq = 0;
         self.removals = 0;
     }
 
-    // -- heap ordered by (count, seq) -------------------------------------
+    // -- Stream-Summary ---------------------------------------------------
 
-    fn less(self: SpaceSaving, a: u32, b: u32) bool {
-        const x = self.entries.items[a];
-        const y = self.entries.items[b];
-        if (x.count != y.count) return x.count < y.count;
-        return x.seq < y.seq;
-    }
-
-    fn swapHeap(self: *SpaceSaving, i: u32, j: u32) void {
-        const h = self.heap.items;
-        std.mem.swap(u32, &h[i], &h[j]);
-        self.entries.items[h[i]].heap_pos = i;
-        self.entries.items[h[j]].heap_pos = j;
-    }
-
-    fn siftUp(self: *SpaceSaving, pos: u32) void {
-        var i = pos;
-        while (i > 0) {
-            const parent = (i - 1) / 2;
-            if (!self.less(self.heap.items[i], self.heap.items[parent])) break;
-            self.swapHeap(i, parent);
-            i = parent;
+    /// The bucket with count `c`, created if needed. Searches forward from
+    /// the bucket after `from` (or from the first bucket if `from` is nil);
+    /// every bucket up to `from` must have a count below `c`.
+    fn findBucket(self: *SpaceSaving, from: u32, c: u64) u32 {
+        const bs = self.buckets.items;
+        var prev = from;
+        var cur = if (from == nil) self.first_bucket else bs[from].next;
+        while (cur != nil and bs[cur].count < c) {
+            prev = cur;
+            cur = bs[cur].next;
         }
+        if (cur != nil and bs[cur].count == c) return cur;
+        // Insert a new bucket between prev and cur.
+        const b = if (self.free_bucket != nil) blk: {
+            const f = self.free_bucket;
+            self.free_bucket = self.buckets.items[f].next;
+            break :blk f;
+        } else blk: {
+            self.buckets.appendAssumeCapacity(undefined);
+            break :blk @as(u32, @intCast(self.buckets.items.len - 1));
+        };
+        const all = self.buckets.items;
+        all[b] = .{ .count = c, .head = nil, .tail = nil, .prev = prev, .next = cur };
+        if (prev == nil) self.first_bucket = b else all[prev].next = b;
+        if (cur != nil) all[cur].prev = b;
+        return b;
     }
 
-    fn siftDown(self: *SpaceSaving, pos: u32) void {
-        var i = pos;
-        const n: u32 = @intCast(self.heap.items.len);
-        while (true) {
-            var smallest = i;
-            const l = 2 * i + 1;
-            const r = l + 1;
-            if (l < n and self.less(self.heap.items[l], self.heap.items[smallest])) smallest = l;
-            if (r < n and self.less(self.heap.items[r], self.heap.items[smallest])) smallest = r;
-            if (smallest == i) break;
-            self.swapHeap(i, smallest);
-            i = smallest;
-        }
+    /// Append entry i at the tail of bucket b (it has the newest seq).
+    fn attach(self: *SpaceSaving, i: u32, b: u32) void {
+        const bucket = &self.buckets.items[b];
+        const e = &self.entries.items[i];
+        e.bucket = b;
+        e.count = bucket.count;
+        e.prev = bucket.tail;
+        e.next = nil;
+        if (bucket.tail == nil) bucket.head = i else self.entries.items[bucket.tail].next = i;
+        bucket.tail = i;
+    }
+
+    /// Unlink entry i from its bucket, freeing the bucket if it empties.
+    fn detach(self: *SpaceSaving, i: u32) void {
+        const e = self.entries.items[i];
+        const bs = self.buckets.items;
+        const bucket = &bs[e.bucket];
+        if (e.prev == nil) bucket.head = e.next else self.entries.items[e.prev].next = e.next;
+        if (e.next == nil) bucket.tail = e.prev else self.entries.items[e.next].prev = e.prev;
+        if (bucket.head != nil) return;
+        if (bucket.prev == nil) self.first_bucket = bucket.next else bs[bucket.prev].next = bucket.next;
+        if (bucket.next != nil) bs[bucket.next].prev = bucket.prev;
+        bucket.next = self.free_bucket;
+        self.free_bucket = e.bucket;
+    }
+
+    /// Move entry i (seq already updated) to the bucket for `new_count`.
+    fn moveTo(self: *SpaceSaving, i: u32, new_count: u64) void {
+        const target = self.findBucket(self.entries.items[i].bucket, new_count);
+        self.detach(i);
+        self.attach(i, target);
     }
 
     /// Body (tag 8): u32 m, u64 N, u64 seq, u32 entry count, then per entry
@@ -284,12 +330,28 @@ pub const SpaceSaving = struct {
             const s = try serde.readInt(r, u64);
             if (e > c or s > self.seq or self.index.contains(key)) return error.InvalidData;
             sum = math.add(u64, sum, c) catch return error.InvalidData;
-            self.entries.appendAssumeCapacity(.{ .key = key, .count = c, .err = e, .seq = s, .heap_pos = @intCast(i) });
-            self.heap.appendAssumeCapacity(@intCast(i));
+            self.entries.appendAssumeCapacity(.{ .key = key, .count = c, .err = e, .seq = s });
             self.index.putAssumeCapacity(key, @intCast(i));
-            self.siftUp(@intCast(i));
         }
         if (sum != self.total) return error.InvalidData; // Lemma 1
+
+        // Rebuild the Stream-Summary: attach in (count, seq) order.
+        const order = try allocator.alloc(u32, n);
+        defer allocator.free(order);
+        for (order, 0..) |*o, i| o.* = @intCast(i);
+        std.mem.sort(u32, order, self.entries.items, struct {
+            fn lessThan(es: []const Entry, a: u32, b: u32) bool {
+                if (es[a].count != es[b].count) return es[a].count < es[b].count;
+                if (es[a].seq != es[b].seq) return es[a].seq < es[b].seq;
+                return a < b;
+            }
+        }.lessThan);
+        var last: u32 = nil;
+        for (order) |i| {
+            const c = self.entries.items[i].count;
+            if (last == nil or self.buckets.items[last].count != c) last = self.findBucket(last, c);
+            self.attach(i, last);
+        }
         return self;
     }
 };
@@ -371,6 +433,76 @@ test "guarantees on a skewed stream" {
     }
 }
 
+/// Reference model: evict the entry with the smallest (count, seq) by
+/// linear scan, as SPEC.md §5.8 states it.
+const Model = struct {
+    keys: [64][]const u8 = undefined,
+    counts: [64]u64 = undefined,
+    errs: [64]u64 = undefined,
+    seqs: [64]u64 = undefined,
+    n: usize = 0,
+    seq: u64 = 0,
+
+    fn add(m: *Model, cap: usize, key: []const u8, w: u64) void {
+        for (0..m.n) |i| if (std.mem.eql(u8, m.keys[i], key)) {
+            m.counts[i] += w;
+            m.seq += 1;
+            m.seqs[i] = m.seq;
+            return;
+        };
+        m.seq += 1;
+        if (m.n < cap) {
+            m.keys[m.n] = key;
+            m.counts[m.n] = w;
+            m.errs[m.n] = 0;
+            m.seqs[m.n] = m.seq;
+            m.n += 1;
+            return;
+        }
+        var v: usize = 0;
+        for (1..m.n) |i| {
+            if (m.counts[i] < m.counts[v] or (m.counts[i] == m.counts[v] and m.seqs[i] < m.seqs[v])) v = i;
+        }
+        m.keys[v] = key;
+        m.errs[v] = m.counts[v];
+        m.counts[v] += w;
+        m.seqs[v] = m.seq;
+    }
+};
+
+test "matches the linear-scan model, including weighted adds and ties" {
+    const names = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l" };
+    for ([_]u32{ 1, 2, 3, 5, 8 }) |cap| {
+        var ss = try SpaceSaving.init(testing.allocator, .{ .capacity = cap });
+        defer ss.deinit(testing.allocator);
+        var model: Model = .{};
+        var rng = @import("hash.zig").SplitMix64.init(cap);
+        for (0..5000) |step| {
+            const key = names[@min(rng.below(names.len), rng.below(names.len))];
+            const w: u64 = if (rng.below(4) == 0) 1 + rng.below(5) else 1;
+            try ss.add(testing.allocator, key, w);
+            model.add(cap, key, w);
+            if (step % 97 == 0) {
+                // Round-trip mid-stream: the rebuilt structure must agree.
+                const bytes = try serde.toOwnedBytes(testing.allocator, ss);
+                defer testing.allocator.free(bytes);
+                var r: std.Io.Reader = .fixed(bytes);
+                const back = try SpaceSaving.deserialize(testing.allocator, &r);
+                ss.deinit(testing.allocator);
+                ss = back;
+            }
+        }
+        try testing.expectEqual(model.n, ss.len());
+        for (0..model.n) |i| {
+            const e = ss.entries.items[i];
+            try testing.expectEqualStrings(model.keys[i], e.key);
+            try testing.expectEqual(model.counts[i], e.count);
+            try testing.expectEqual(model.errs[i], e.err);
+            try testing.expectEqual(model.seqs[i], e.seq);
+        }
+    }
+}
+
 test "serialize round trip" {
     var ss = try SpaceSaving.init(testing.allocator, .{ .capacity = 3 });
     defer ss.deinit(testing.allocator);
@@ -389,7 +521,7 @@ test "serialize round trip" {
         try testing.expectEqualStrings(a.key, b.key);
         try testing.expectEqual(a.count, b.count);
     }
-    // The restored heap evicts the same entry next.
+    // The restored structure evicts the same entry next.
     try ss.add(testing.allocator, "z", 1);
     try back.add(testing.allocator, "z", 1);
     try testing.expectEqual(ss.get("z").?.err, back.get("z").?.err);

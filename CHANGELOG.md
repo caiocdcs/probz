@@ -27,6 +27,12 @@
   47 → 40 ns). Results are bit-identical; the index adds 8·(δ + 2) bytes.
 - `memoryBytes()` (new) reports the preallocated size.
 
+### Space-Saving
+- Entries live in the paper's Stream-Summary structure (§3.2) instead of a
+  binary heap: unit increments and evictions are O(1). add on a 10M-event
+  Zipf stream with m = 1536: 181 → 108 ns (s = 0.8), 118 → 73 ns (s = 1.0),
+  48 → 34 ns (s = 1.2). Results are bit-identical.
+
 ### Count-Min sketch
 - New `.update = .conservative` option (Estan & Varghese 2002, §3.3.2):
   each counter is raised only to max(counter, estimate + c). It never
