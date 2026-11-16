@@ -60,8 +60,10 @@ pub const SpaceSaving = struct {
     removals: u32 = 0,
 
     pub const Entry = struct {
-        /// Owned copy of the item.
+        /// Owned copy of the item: the first `key.len` bytes of a buffer of
+        /// `key_cap` bytes, reused by later evictions when the key fits.
         key: []u8,
+        key_cap: usize = 0,
         /// Estimated count (an upper bound on the true count).
         count: u64,
         /// Maximum over-estimation: count − error ≤ true count.
@@ -124,7 +126,7 @@ pub const SpaceSaving = struct {
     }
 
     pub fn deinit(self: *SpaceSaving, allocator: Allocator) void {
-        for (self.entries.items) |e| allocator.free(e.key);
+        for (self.entries.items) |e| allocator.free(e.key.ptr[0..e.key_cap]);
         self.entries.deinit(allocator);
         self.buckets.deinit(allocator);
         self.index.deinit(allocator);
@@ -148,7 +150,7 @@ pub const SpaceSaving = struct {
             errdefer allocator.free(key);
             const i: u32 = @intCast(self.entries.items.len);
             self.seq += 1;
-            self.entries.appendAssumeCapacity(.{ .key = key, .count = amount, .err = 0, .seq = self.seq });
+            self.entries.appendAssumeCapacity(.{ .key = key, .key_cap = key.len, .count = amount, .err = 0, .seq = self.seq });
             self.index.putAssumeCapacity(key, i);
             self.attach(i, self.findBucket(nil, amount));
         } else {
@@ -157,9 +159,18 @@ pub const SpaceSaving = struct {
             const e = &self.entries.items[i];
             const min = e.count;
             const new_count = math.add(u64, min, amount) catch return error.Overflow;
-            const key = try allocator.dupe(u8, item);
+            // Reuse the evicted key's buffer when the new key fits.
+            const fresh: ?[]u8 = if (item.len > e.key_cap) try allocator.dupe(u8, item) else null;
             _ = self.index.remove(e.key);
-            allocator.free(e.key);
+            const key = if (fresh) |f| blk: {
+                allocator.free(e.key.ptr[0..e.key_cap]);
+                e.key_cap = f.len;
+                break :blk f;
+            } else blk: {
+                const k = e.key.ptr[0..item.len];
+                @memcpy(k, item);
+                break :blk k;
+            };
             // Evictions leave tombstones in the index; rehash periodically
             // so lookups of absent keys stay short (amortized O(1)).
             self.removals += 1;
@@ -222,7 +233,7 @@ pub const SpaceSaving = struct {
     }
 
     pub fn clear(self: *SpaceSaving, allocator: Allocator) void {
-        for (self.entries.items) |e| allocator.free(e.key);
+        for (self.entries.items) |e| allocator.free(e.key.ptr[0..e.key_cap]);
         self.entries.clearRetainingCapacity();
         self.buckets.clearRetainingCapacity();
         self.first_bucket = nil;
@@ -330,7 +341,7 @@ pub const SpaceSaving = struct {
             const s = try serde.readInt(r, u64);
             if (e > c or s > self.seq or self.index.contains(key)) return error.InvalidData;
             sum = math.add(u64, sum, c) catch return error.InvalidData;
-            self.entries.appendAssumeCapacity(.{ .key = key, .count = c, .err = e, .seq = s });
+            self.entries.appendAssumeCapacity(.{ .key = key, .key_cap = key.len, .count = c, .err = e, .seq = s });
             self.index.putAssumeCapacity(key, @intCast(i));
         }
         if (sum != self.total) return error.InvalidData; // Lemma 1
