@@ -490,16 +490,30 @@ rho = clz64(w) + 1                  # 1 .. 64 - p + 1
 M[j] = max(M[j], rho)
 ```
 
-**Cardinality** (Flajolet et al., Figure 3, without the 32-bit
-large-range correction):
+**Cardinality** (Ertl 2017, improved raw estimator, Algorithm 6). Let
+q = 64 − p and C_k = the number of registers equal to k, for k = 0 … q+1.
+Implementations may keep C up to date on add and merge, or rebuild it.
 
 ```
-alpha = 0.673 (m=16), 0.697 (m=32), 0.709 (m=64), else 0.7213 / (1 + 1.079 / m)
-E = alpha · m^2 / Σ_j 2^(-M[j])
-V = number of j with M[j] = 0
-if E <= 2.5·m and V > 0: return m · ln(m / V)
-return E
+sigma(x):                         # x in [0, 1]
+  if x == 1: return +inf
+  y = 1; z = x
+  loop: x = x*x; z' = z; z = z + x*y; y = 2*y; if z == z': return z
+
+tau(x):                           # x in [0, 1]
+  if x == 0 or x == 1: return 0
+  y = 1; z = 1 - x
+  loop: x = sqrt(x); z' = z; y = y/2; z = z - (1-x)^2 * y; if z == z': return z/3
+
+z = m · tau(1 - C[q+1]/m)
+for k = q down to 1: z = 0.5 · (z + C[k])
+z = z + m · sigma(C[0]/m)
+return alpha_inf · m^2 / z          # alpha_inf = 1 / (2 ln 2)
 ```
+
+All arithmetic is IEEE-754 binary64 in the order shown, so results are
+bit-identical across implementations. The result is 0 for an empty sketch
+and +inf when every register equals q + 1.
 
 Standard error: 1.04 / √m.
 
@@ -521,6 +535,9 @@ Standard error: 1.04 / √m.
 - Stefan Heule, Marc Nunkesser, Alexander Hall, "HyperLogLog in
   Practice", EDBT 2013, pp. 683–692, §5.1.
   <https://doi.org/10.1145/2452376.2452456>
+- Otmar Ertl, "New cardinality estimation algorithms for HyperLogLog
+  sketches", arXiv:1702.01284, 2017, §3.3 (Eq. 32) and §3.4
+  (Algorithm 6). <https://arxiv.org/abs/1702.01284>
 
 Vector: `testdata/vectors/hyperloglog.json`.
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### HyperLogLog
+- `cardinality()` uses Ertl's improved raw estimator (arXiv:1702.01284,
+  Algorithm 6) over a register histogram that is kept up to date on add
+  and merge. It takes O(q) time instead of O(m): about 29 ns instead of 11 µs
+  at p = 14. It is also unbiased in the 2.5·m–5·m range where linear
+  counting used to hand over to the raw estimate. Estimates differ from 0.1.0;
+  the wire format is unchanged.
+- `merge` compares eight registers per u64 word: about 6× faster.
+- `memoryBytes()` includes the 256-byte histogram.
+
 ## 0.1.0 (2026-11-15)
 
 First versioned release. Every structure was reviewed against its paper.
