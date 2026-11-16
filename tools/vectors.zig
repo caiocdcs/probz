@@ -354,8 +354,16 @@ fn genTDigest(arena: Allocator) anyerror![]const u8 {
     var cdfs: [xs.len]C = undefined;
     for (xs, &cdfs) |x, *out| out.* = .{ .x = x, .cdf = try td.cdf(x) };
 
+    // Same input with the k2 scale function.
+    var td2 = try probz.TDigest.init(arena, .{ .compression = 20, .scale = .k2 });
+    g = probz.hash.SplitMix64.init(1);
+    for (0..2000) |_| try td2.add(@as(f64, @floatFromInt(g.next() >> 11)) * 0x1p-53 * 1000);
+    td2.flush();
+    var quantiles2: [qs.len]Q = undefined;
+    for (qs, &quantiles2) |q, *out| out.* = .{ .q = q, .value = try td2.quantile(q) };
+
     return toJson(arena, .{
-        .description = "t-digest (SPEC.md §5.9): compression=20; add 2000 values x = (SplitMix64(seed 1).next() >> 11) * 2^-53 * 1000; flush. Compare floats with relative tolerance 1e-9 (asin/sin may differ by an ulp across libms).",
+        .description = "t-digest (SPEC.md §5.9): compression=20; add 2000 values x = (SplitMix64(seed 1).next() >> 11) * 2^-53 * 1000; flush. `k2` repeats it with scale = k2. Compare floats with relative tolerance 1e-9 (asin/sin/log/exp may differ by an ulp across libms).",
         .params = .{ .compression = 20 },
         .centroids = td.centroids.items,
         .min = td.min,
@@ -363,6 +371,11 @@ fn genTDigest(arena: Allocator) anyerror![]const u8 {
         .quantiles = quantiles,
         .cdf = cdfs,
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, td)),
+        .k2 = .{
+            .centroids = td2.centroids.items,
+            .quantiles = quantiles2,
+            .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, td2)),
+        },
     });
 }
 

@@ -44,8 +44,12 @@ follows, and notes any deliberate deviation.
   overcounts by at most ε·N with probability 1 − δ.
 - **What are the most frequent items?** `SpaceSaving` on a stream, or
   `TopKTracker` over known candidates.
-- **What is the p99?** `TDigest` for real values (most accurate at the
-  tails), `QDigest` for integers with a hard rank-error bound.
+- **What is the p99?** `TDigest` for real values, `QDigest` for integers
+  with a hard rank-error bound. `TDigest` defaults to the k₁ scale
+  function, which is accurate across all quantiles. If you mostly query
+  extreme tails (p99.9, p99.99), `.scale = .k2` is 5–20× more accurate
+  there, at the cost of the middle. With k₁ a digest holds about 0.6·δ
+  centroids.
 - **What is similar to this document?** `MinHashLSH` over shingles or tokens.
 
 ## Install

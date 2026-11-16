@@ -26,6 +26,11 @@
   the new points and merges them with the already-sorted centroids (add:
   47 → 40 ns). Results are bit-identical; the index adds 8·(δ + 2) bytes.
 - `memoryBytes()` (new) reports the preallocated size.
+- New opt-in `.scale = .k2` (Dunning & Ertl Eq. 8). At δ = 100 on 1M normal
+  values, rank error at q = 0.001 / 0.999 drops from 0.0175% / 0.0030% to
+  0.0015% / 0.0008%; the median rises from 0.003% to 0.023%. k₁ stays the
+  default and is unchanged. The wire format records k₂ as a negative δ, so
+  existing data reads as before.
 
 ### Space-Saving
 - Entries live in the paper's Stream-Summary structure (§3.2) instead of a

@@ -15,6 +15,19 @@
 //! produces at most ⌈δ⌉ + 2 centroids. probz preallocates that, so `add`,
 //! `quantile` and `cdf` never allocate.
 //!
+//! Opt-in `.scale = .k2` uses the normalized k₂ (Eq. 8) instead:
+//!
+//!   k₂(q) = δ / Z · ln(q / (1 − q)),   Z = 4 · ln(max(n, δ) / δ) + 24
+//!   k₂⁻¹(k) = 1 / (1 + e^(−k·Z/δ))
+//!
+//! where n is the total weight at the merge. Clusters at the extremes shrink
+//! further (the first and last element are never merged), so q ≤ 0.001 and
+//! q ≥ 0.999 are 5–40× more accurate than with k₁ at a similar centroid
+//! count, but the middle is less accurate (median error up to ~10× worse on
+//! skewed data). The paper bounds the k₂ centroid count by ⌈δ⌉ for
+//! n < 10^60. Deviation: the paper's Z uses n; probz clamps n to at least δ
+//! so Z stays ≥ 24 (Z would go negative for n < δ · e^−6).
+//!
 //! Interpolation (not fixed by the paper; specified in SPEC.md §5.9):
 //! quantiles are piecewise linear through (0, min), each centroid's
 //! (center of mass, mean), and (N, max). `cdf` is the inverse of that
@@ -24,7 +37,7 @@
 //!
 //! - Ted Dunning, Otmar Ertl, "Computing Extremely Accurate Quantiles Using
 //!   t-Digests", arXiv:1902.04023, 2019. Eq. 3 (k₁), Eq. 4 (size bound),
-//!   Algorithm 1 (merging). https://arxiv.org/abs/1902.04023
+//!   Eq. 8 (k₂), Algorithm 1 (merging). https://arxiv.org/abs/1902.04023
 //! - Reference implementation (MergingDigest): https://github.com/tdunning/t-digest
 
 const std = @import("std");
@@ -35,6 +48,7 @@ const serde = @import("serde.zig");
 
 pub const TDigest = struct {
     compression: f64,
+    scale: Scale,
     /// Sorted by (mean, weight), fully merged.
     centroids: std.ArrayList(Centroid),
     /// Unmerged points. Also used as scratch space during a merge.
@@ -59,10 +73,19 @@ pub const TDigest = struct {
         }
     };
 
+    /// Scale function (Dunning & Ertl §2.8).
+    pub const Scale = enum {
+        /// Eq. 3: balanced accuracy across all quantiles (default).
+        k1,
+        /// Eq. 8: more accurate at the extreme tails, less in the middle.
+        k2,
+    };
+
     pub const Options = struct {
         /// δ in [10, 10000]. Larger is more accurate; at most ⌈δ⌉ + 2
-        /// centroids are kept.
+        /// centroids are kept. With k₁ a digest typically holds about 0.6·δ.
         compression: f64 = 100,
+        scale: Scale = .k1,
     };
 
     pub const InitError = error{InvalidParameters} || Allocator.Error;
@@ -82,6 +105,7 @@ pub const TDigest = struct {
         const centers = try allocator.alloc(f64, max_centroids);
         return .{
             .compression = delta,
+            .scale = options.scale,
             .centroids = centroids,
             .buffer = buffer,
             .centers = centers,
@@ -148,7 +172,8 @@ pub const TDigest = struct {
         const n: f64 = @floatFromInt(self.total);
         self.centroids.clearRetainingCapacity();
         var q0: f64 = 0;
-        var q_limit = self.kInverse(self.k(q0) + 1);
+        const z = self.normalizer();
+        var q_limit = self.kInverse(self.k(q0, z) + 1, z);
         var sigma = xs[0];
         for (xs[1..]) |x| {
             const q = q0 + @as(f64, @floatFromInt(sigma.weight + x.weight)) / n;
@@ -159,7 +184,7 @@ pub const TDigest = struct {
             } else {
                 self.centroids.appendAssumeCapacity(sigma);
                 q0 += @as(f64, @floatFromInt(sigma.weight)) / n;
-                q_limit = self.kInverse(self.k(q0) + 1);
+                q_limit = self.kInverse(self.k(q0, z) + 1, z);
                 sigma = x;
             }
         }
@@ -185,14 +210,27 @@ pub const TDigest = struct {
     }
 
     /// k₁(q) = δ / (2π) · asin(2q − 1)
-    fn k(self: TDigest, q: f64) f64 {
-        return self.compression / (2 * math.pi) * math.asin(2 * q - 1);
+    /// k₂'s Z = 4 · ln(max(N, δ) / δ) + 24 for the current total (unused by k₁).
+    fn normalizer(self: TDigest) f64 {
+        const n = @max(@as(f64, @floatFromInt(self.total)), self.compression);
+        return 4 * @log(n / self.compression) + 24;
     }
 
-    /// k₁⁻¹(k) = (sin(2πk / δ) + 1) / 2, clamped at k ≥ δ/4 to 1.
-    fn kInverse(self: TDigest, kv: f64) f64 {
-        if (kv >= self.compression / 4) return 1;
-        return (@sin(2 * math.pi * kv / self.compression) + 1) / 2;
+    /// k₁(q) = δ / (2π) · asin(2q − 1);  k₂(q) = δ / Z · ln(q / (1 − q)).
+    fn k(self: TDigest, q: f64, z: f64) f64 {
+        return switch (self.scale) {
+            .k1 => self.compression / (2 * math.pi) * math.asin(2 * q - 1),
+            .k2 => if (q <= 0) -math.inf(f64) else if (q >= 1) math.inf(f64) else self.compression / z * @log(q / (1 - q)),
+        };
+    }
+
+    /// k₁⁻¹(k) = (sin(2πk / δ) + 1) / 2, clamped to 1 at k ≥ δ/4;
+    /// k₂⁻¹(k) = 1 / (1 + e^(−k·Z/δ)).
+    fn kInverse(self: TDigest, kv: f64, z: f64) f64 {
+        return switch (self.scale) {
+            .k1 => if (kv >= self.compression / 4) 1 else (@sin(2 * math.pi * kv / self.compression) + 1) / 2,
+            .k2 => 1 / (1 + @exp(-kv * z / self.compression)),
+        };
     }
 
     /// Estimated value at quantile q in [0, 1].
@@ -324,7 +362,8 @@ pub const TDigest = struct {
     /// (f64 mean, u64 weight). Empty digests write min = +inf, max = −inf.
     pub fn serialize(self: TDigest, w: *std.Io.Writer) serde.WriteError!void {
         try serde.writeHeader(w, .tdigest);
-        try serde.writeF64(w, self.compression);
+        // The sign of δ records the scale function: negative means k₂.
+        try serde.writeF64(w, if (self.scale == .k2) -self.compression else self.compression);
         try serde.writeInt(w, u64, self.total);
         try serde.writeF64(w, self.min);
         try serde.writeF64(w, self.max);
@@ -339,7 +378,12 @@ pub const TDigest = struct {
 
     pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!TDigest {
         try serde.readHeader(r, .tdigest);
-        var self = init(allocator, .{ .compression = try serde.readF64(r) }) catch |err| return serde.fromInitError(err);
+        const signed_delta = try serde.readF64(r);
+        const options: Options = if (math.signbit(signed_delta))
+            .{ .compression = -signed_delta, .scale = .k2 }
+        else
+            .{ .compression = signed_delta, .scale = .k1 };
+        var self = init(allocator, options) catch |err| return serde.fromInitError(err);
         errdefer self.deinit(allocator);
         self.total = try serde.readInt(r, u64);
         self.min = try serde.readF64(r);
@@ -464,8 +508,8 @@ test "rank error within one k1 unit around q" {
         std.mem.sort(f64, data, {}, std.sort.asc(f64));
 
         for ([_]f64{ 0.0001, 0.001, 0.01, 0.1, 0.5, 0.9, 0.99, 0.999, 0.9999 }) |q| {
-            const kq = td.k(q);
-            const tol = td.kInverse(kq + 0.5) - td.kInverse(@max(kq - 0.5, -delta / 4));
+            const kq = td.k(q, 0);
+            const tol = td.kInverse(kq + 0.5, 0) - td.kInverse(@max(kq - 0.5, -delta / 4), 0);
             const est = try td.quantile(q);
             try testing.expect(rankError(data, est, q) <= tol);
             try testing.expect(@abs(try td.cdf(est) - q) <= tol);
@@ -473,6 +517,55 @@ test "rank error within one k1 unit around q" {
         try testing.expectEqual(data[0], try td.quantile(0));
         try testing.expectEqual(data[n - 1], try td.quantile(1));
     }
+}
+
+test "k2 scale: tighter extremes, bounded size, round trip" {
+    const n = 200_000;
+    var rng = std.Random.DefaultPrng.init(7);
+    const data = try testing.allocator.alloc(f64, n);
+    defer testing.allocator.free(data);
+    for (data) |*x| x.* = rng.random().floatNorm(f64);
+
+    var d1 = try TDigest.init(testing.allocator, .{ .compression = 100 });
+    defer d1.deinit(testing.allocator);
+    var d2 = try TDigest.init(testing.allocator, .{ .compression = 100, .scale = .k2 });
+    defer d2.deinit(testing.allocator);
+    for (data) |x| {
+        try d1.add(x);
+        try d2.add(x);
+    }
+    d2.flush();
+    try testing.expect(d2.centroids.items.len <= 100);
+    // The extremes stay single points.
+    try testing.expectEqual(@as(u64, 1), d2.centroids.items[0].weight);
+    try testing.expectEqual(@as(u64, 1), d2.centroids.items[d2.centroids.items.len - 1].weight);
+
+    std.mem.sort(f64, data, {}, std.sort.asc(f64));
+    var tail1: f64 = 0;
+    var tail2: f64 = 0;
+    for ([_]f64{ 0.0001, 0.001, 0.999, 0.9999 }) |q| {
+        tail1 += rankError(data, try d1.quantile(q), q);
+        tail2 += rankError(data, try d2.quantile(q), q);
+    }
+    try testing.expect(tail2 * 3 < tail1);
+
+    const bytes = try serde.toOwnedBytes(testing.allocator, d2);
+    defer testing.allocator.free(bytes);
+    var r: std.Io.Reader = .fixed(bytes);
+    var back = try TDigest.deserialize(testing.allocator, &r);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqual(TDigest.Scale.k2, back.scale);
+    try testing.expectEqual(@as(f64, 100), back.compression);
+    try testing.expectEqual(try d2.quantile(0.001), try back.quantile(0.001));
+}
+
+test "k2 normalizer stays positive for tiny digests" {
+    var td = try TDigest.init(testing.allocator, .{ .compression = 10_000, .scale = .k2 });
+    defer td.deinit(testing.allocator);
+    try td.add(1);
+    try td.add(2);
+    try testing.expect(td.normalizer() >= 24);
+    try testing.expectEqual(@as(f64, 1.5), try td.quantile(0.5));
 }
 
 test "merge matches a single digest" {

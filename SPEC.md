@@ -650,8 +650,9 @@ Vector: `testdata/vectors/space_saving.json`.
 
 ### 5.9 t-digest (tag 9)
 
-**Parameters.** Compression δ in [10, 10000] (default 100). The buffer
-limit is `B = 5 · ceil(δ)`, and at most `ceil(δ) + 2` centroids are kept.
+**Parameters.** Compression δ in [10, 10000] (default 100) and a scale
+function, k1 (default) or k2. The buffer limit is `B = 5 · ceil(δ)`, and
+at most `ceil(δ) + 2` centroids are kept.
 
 **State.** Sorted centroids (mean f64, weight u64), a buffer of points,
 the total weight N, min, and max (+∞ / −∞ when empty).
@@ -660,13 +661,27 @@ the total weight N, min, and max (+∞ / −∞ when empty).
 min/max, append (x, w) to the buffer, and flush when the buffer holds
 B points.
 
-**Scale function** (paper Eq. 3):
+**Scale function k1** (paper Eq. 3):
 
 ```
 k(q)    = δ / (2π) · asin(2q − 1)
 kinv(k) = 1                         if k ≥ δ/4
         = (sin(2π · k / δ) + 1) / 2 otherwise
 ```
+
+**Scale function k2** (paper Eq. 8), with N the total weight at the
+flush, computed once per flush:
+
+```
+Z       = 4 · ln(max(N, δ) / δ) + 24
+k(q)    = −∞ if q ≤ 0;  +∞ if q ≥ 1;  δ / Z · ln(q / (1 − q)) otherwise
+kinv(k) = 1 / (1 + exp(−k · Z / δ))      # kinv(−∞) = 0, kinv(+∞) = 1
+```
+
+Deviation: the paper's Z uses N directly. probz clamps N to at least δ so
+that Z ≥ 24 (it would turn negative for N < δ · e^−6). k2 keeps the first
+and last element unmerged (kinv(k(0) + 1) = 0) and trades middle-quantile
+accuracy for accuracy at the extremes.
 
 **Flush** (paper Algorithm 1). If the buffer is empty, do nothing.
 Otherwise let X be buffer ∪ centroids, sorted by (mean, weight)
@@ -701,7 +716,7 @@ digest's δ.
 
 | Field | Type |
 |---|---|
-| δ | f64 |
+| δ | f64; negative (−δ) for scale k2 |
 | N | u64 |
 | min, max | f64, f64 |
 | centroid count | u32 (≤ ceil(δ) + 2) |
@@ -710,12 +725,13 @@ digest's δ.
 | buffer | entries |
 
 **Floating point.** Ports should compare t-digest vector outputs with a
-relative tolerance of 1e-9, because asin/sin results can differ by an
-ulp across math libraries.
+relative tolerance of 1e-9, because asin/sin/log/exp results can differ
+by an ulp across math libraries.
 
 **References.**
 - Ted Dunning, Otmar Ertl, "Computing Extremely Accurate Quantiles Using
-  t-Digests", arXiv:1902.04023, 2019: Eq. 3 (k₁), Eq. 4, Algorithm 1.
+  t-Digests", arXiv:1902.04023, 2019: Eq. 3 (k₁), Eq. 4, Eq. 8 (k₂),
+  Algorithm 1.
   <https://arxiv.org/abs/1902.04023>
 - Reference implementation: <https://github.com/tdunning/t-digest>
 
