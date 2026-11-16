@@ -32,6 +32,10 @@
   binary heap: unit increments and evictions are O(1). add on a 10M-event
   Zipf stream with m = 1536: 181 → 108 ns (s = 0.8), 118 → 73 ns (s = 1.0),
   48 → 34 ns (s = 1.2). Results are bit-identical.
+- Evictions reuse the key buffer, and the key index is an open-addressing
+  table on XxHash64 with backward-shift deletion (no tombstones, no
+  rehash) instead of `StringHashMap`. add is now 28.5 / 24.7 / 16.5 ns,
+  3–6× faster than 0.1.0 overall.
 
 ### Count-Min sketch
 - New `.update = .conservative` option (Estan & Varghese 2002, §3.3.2):

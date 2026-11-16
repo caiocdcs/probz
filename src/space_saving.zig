@@ -39,6 +39,7 @@ const std = @import("std");
 const math = std.math;
 const Allocator = std.mem.Allocator;
 
+const hashing = @import("hash.zig");
 const serde = @import("serde.zig");
 
 const nil = math.maxInt(u32);
@@ -50,20 +51,21 @@ pub const SpaceSaving = struct {
     buckets: std.ArrayList(Bucket),
     first_bucket: u32 = nil,
     free_bucket: u32 = nil,
-    /// key -> entry index
-    index: std.StringHashMapUnmanaged(u32),
+    /// Open-addressing index (linear probing): slot -> entry index or nil.
+    /// Power-of-two size ≥ 2m, so the load factor stays ≤ 1/2.
+    slots: []u32,
     /// N
     total: u64,
     /// Global update counter, for deterministic tie-breaking.
     seq: u64,
-    /// Index removals since the last rehash (tombstone cleanup).
-    removals: u32 = 0,
 
     pub const Entry = struct {
         /// Owned copy of the item: the first `key.len` bytes of a buffer of
         /// `key_cap` bytes, reused by later evictions when the key fits.
         key: []u8,
         key_cap: usize = 0,
+        /// XxHash64 of the key (SPEC.md §2.1), for the index.
+        hash: u64 = 0,
         /// Estimated count (an upper bound on the true count).
         count: u64,
         /// Maximum over-estimation: count − error ≤ true count.
@@ -113,7 +115,7 @@ pub const SpaceSaving = struct {
             .capacity = options.capacity,
             .entries = .empty,
             .buckets = .empty,
-            .index = .empty,
+            .slots = &.{},
             .total = 0,
             .seq = 0,
         };
@@ -121,7 +123,9 @@ pub const SpaceSaving = struct {
         try self.entries.ensureTotalCapacity(allocator, options.capacity);
         // One bucket per distinct count, plus one while an entry moves.
         try self.buckets.ensureTotalCapacity(allocator, @as(usize, options.capacity) + 1);
-        try self.index.ensureTotalCapacity(allocator, options.capacity);
+        const slot_count = math.ceilPowerOfTwo(usize, 2 * @as(usize, options.capacity)) catch return error.OutOfMemory;
+        self.slots = try allocator.alloc(u32, slot_count);
+        @memset(self.slots, nil);
         return self;
     }
 
@@ -129,7 +133,7 @@ pub const SpaceSaving = struct {
         for (self.entries.items) |e| allocator.free(e.key.ptr[0..e.key_cap]);
         self.entries.deinit(allocator);
         self.buckets.deinit(allocator);
-        self.index.deinit(allocator);
+        allocator.free(self.slots);
         self.* = undefined;
     }
 
@@ -138,8 +142,9 @@ pub const SpaceSaving = struct {
     pub fn add(self: *SpaceSaving, allocator: Allocator, item: []const u8, amount: u64) AddError!void {
         if (amount == 0) return;
         const new_total = math.add(u64, self.total, amount) catch return error.Overflow;
+        const h = hashing.hashBytes(item);
 
-        if (self.index.get(item)) |i| {
+        if (self.lookup(h, item)) |i| {
             const e = &self.entries.items[i];
             const new_count = math.add(u64, e.count, amount) catch return error.Overflow;
             self.seq += 1;
@@ -150,8 +155,8 @@ pub const SpaceSaving = struct {
             errdefer allocator.free(key);
             const i: u32 = @intCast(self.entries.items.len);
             self.seq += 1;
-            self.entries.appendAssumeCapacity(.{ .key = key, .key_cap = key.len, .count = amount, .err = 0, .seq = self.seq });
-            self.index.putAssumeCapacity(key, i);
+            self.entries.appendAssumeCapacity(.{ .key = key, .key_cap = key.len, .hash = h, .count = amount, .err = 0, .seq = self.seq });
+            self.insertIndex(i);
             self.attach(i, self.findBucket(nil, amount));
         } else {
             // Replacement step: evict the oldest entry with the minimum count.
@@ -161,7 +166,7 @@ pub const SpaceSaving = struct {
             const new_count = math.add(u64, min, amount) catch return error.Overflow;
             // Reuse the evicted key's buffer when the new key fits.
             const fresh: ?[]u8 = if (item.len > e.key_cap) try allocator.dupe(u8, item) else null;
-            _ = self.index.remove(e.key);
+            self.removeIndex(i);
             const key = if (fresh) |f| blk: {
                 allocator.free(e.key.ptr[0..e.key_cap]);
                 e.key_cap = f.len;
@@ -171,20 +176,14 @@ pub const SpaceSaving = struct {
                 @memcpy(k, item);
                 break :blk k;
             };
-            // Evictions leave tombstones in the index; rehash periodically
-            // so lookups of absent keys stay short (amortized O(1)).
-            self.removals += 1;
-            if (self.removals >= self.index.capacity() / 2) {
-                self.index.rehash(std.hash_map.StringContext{});
-                self.removals = 0;
-            }
             self.seq += 1;
             // Assign fields one by one: a struct literal assigned to `e.*`
             // would overwrite `e.count` before reading it.
             e.key = key;
+            e.hash = h;
             e.err = min;
             e.seq = self.seq;
-            self.index.putAssumeCapacity(key, i);
+            self.insertIndex(i);
             self.moveTo(i, new_count);
         }
         self.total = new_total;
@@ -193,13 +192,13 @@ pub const SpaceSaving = struct {
     /// Upper bound on the item's true count: its counter if monitored,
     /// otherwise the minimum counter (0 while fewer than m items are seen).
     pub fn count(self: SpaceSaving, item: []const u8) u64 {
-        if (self.index.get(item)) |i| return self.entries.items[i].count;
+        if (self.lookup(hashing.hashBytes(item), item)) |i| return self.entries.items[i].count;
         return self.minCount();
     }
 
     /// The monitored entry for an item, if any.
     pub fn get(self: SpaceSaving, item: []const u8) ?Item {
-        const i = self.index.get(item) orelse return null;
+        const i = self.lookup(hashing.hashBytes(item), item) orelse return null;
         const e = self.entries.items[i];
         return .{ .key = e.key, .count = e.count, .err = e.err };
     }
@@ -238,10 +237,51 @@ pub const SpaceSaving = struct {
         self.buckets.clearRetainingCapacity();
         self.first_bucket = nil;
         self.free_bucket = nil;
-        self.index.clearRetainingCapacity();
+        @memset(self.slots, nil);
         self.total = 0;
         self.seq = 0;
-        self.removals = 0;
+    }
+
+    // -- index ------------------------------------------------------------
+
+    fn lookup(self: SpaceSaving, h: u64, key: []const u8) ?u32 {
+        const mask = self.slots.len - 1;
+        var pos: usize = @intCast(h & mask);
+        while (true) : (pos = (pos + 1) & mask) {
+            const i = self.slots[pos];
+            if (i == nil) return null;
+            const e = &self.entries.items[i];
+            if (e.hash == h and std.mem.eql(u8, e.key, key)) return i;
+        }
+    }
+
+    fn insertIndex(self: *SpaceSaving, i: u32) void {
+        const mask = self.slots.len - 1;
+        var pos: usize = @intCast(self.entries.items[i].hash & mask);
+        while (self.slots[pos] != nil) pos = (pos + 1) & mask;
+        self.slots[pos] = i;
+    }
+
+    /// Remove entry i with backward-shift deletion: later entries of the
+    /// probe run move back into the hole, so no tombstones are left.
+    fn removeIndex(self: *SpaceSaving, i: u32) void {
+        const mask = self.slots.len - 1;
+        var hole: usize = @intCast(self.entries.items[i].hash & mask);
+        while (self.slots[hole] != i) hole = (hole + 1) & mask;
+        var j = hole;
+        while (true) {
+            j = (j + 1) & mask;
+            const s = self.slots[j];
+            if (s == nil) break;
+            const home: usize = @intCast(self.entries.items[s].hash & mask);
+            // Keep s if its home lies cyclically in (hole, j]; else move it.
+            const stays = if (hole <= j) (hole < home and home <= j) else (hole < home or home <= j);
+            if (!stays) {
+                self.slots[hole] = s;
+                hole = j;
+            }
+        }
+        self.slots[hole] = nil;
     }
 
     // -- Stream-Summary ---------------------------------------------------
@@ -339,10 +379,11 @@ pub const SpaceSaving = struct {
             const c = try serde.readInt(r, u64);
             const e = try serde.readInt(r, u64);
             const s = try serde.readInt(r, u64);
-            if (e > c or s > self.seq or self.index.contains(key)) return error.InvalidData;
+            const h = hashing.hashBytes(key);
+            if (e > c or s > self.seq or self.lookup(h, key) != null) return error.InvalidData;
             sum = math.add(u64, sum, c) catch return error.InvalidData;
-            self.entries.appendAssumeCapacity(.{ .key = key, .key_cap = key.len, .count = c, .err = e, .seq = s });
-            self.index.putAssumeCapacity(key, @intCast(i));
+            self.entries.appendAssumeCapacity(.{ .key = key, .key_cap = key.len, .hash = h, .count = c, .err = e, .seq = s });
+            self.insertIndex(@intCast(i));
         }
         if (sum != self.total) return error.InvalidData; // Lemma 1
 
