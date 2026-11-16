@@ -29,6 +29,7 @@ pub const Tag = enum(u8) {
     tdigest = 9,
     qdigest = 10,
     minhash_lsh = 11,
+    blocked_bloom_filter = 12,
     _,
 };
 

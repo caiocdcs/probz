@@ -24,6 +24,7 @@ pub const Case = struct {
 pub const cases = [_]Case{
     .{ .name = "hash", .generate = genHash },
     .{ .name = "bloom_filter", .generate = genBloom },
+    .{ .name = "blocked_bloom_filter", .generate = genBlockedBloom },
     .{ .name = "counting_bloom_filter", .generate = genCountingBloom },
     .{ .name = "scalable_bloom_filter", .generate = genScalableBloom },
     .{ .name = "cuckoo_filter", .generate = genCuckoo },
@@ -115,6 +116,30 @@ fn genBloom(arena: Allocator) anyerror![]const u8 {
         .contains = present,
         .set_bits = bf.bits.countSet(),
         .estimated_items = bf.estimatedItems(),
+        .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, bf)),
+    });
+}
+
+fn genBlockedBloom(arena: Allocator) anyerror![]const u8 {
+    const blocks = 4;
+    const k = 8;
+    var bf = try probz.BlockedBloomFilter.initExact(arena, blocks, k);
+    const items = try inputs(arena, 200);
+    for (items[0..100]) |item| bf.add(item);
+    const present = try arena.alloc(bool, items.len);
+    for (items, present) |item, *p| p.* = bf.contains(item);
+
+    const salts = try arena.alloc([]const u8, probz.BlockedBloomFilter.salts.len);
+    for (salts, probz.BlockedBloomFilter.salts) |*out, s| out.* = try hex64(arena, s);
+    const sized = try probz.BlockedBloomFilter.optimalParams(1_000_000, 0.01);
+
+    return toJson(arena, .{
+        .description = "Blocked Bloom filter (SPEC.md §5.12): initExact(blocks=4, k=8), add item-0..item-99, query item-0..item-199. `sizing` is init(expected_items=1000000, fp_rate=0.01) (advisory).",
+        .params = .{ .blocks = blocks, .k = k },
+        .salts = salts,
+        .inserted = 100,
+        .contains = present,
+        .sizing = .{ .blocks = sized.blocks, .k = sized.k },
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, bf)),
     });
 }

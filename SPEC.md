@@ -142,6 +142,7 @@ followed by that many bytes.
 | 9 | t-digest |
 | 10 | q-digest |
 | 11 | MinHash LSH |
+| 12 | Blocked Bloom filter |
 
 Readers must reject a wrong magic, an unknown version, a tag that differs
 from the expected structure, and any body whose lengths contradict its
@@ -822,3 +823,60 @@ Band maps are rebuilt on load.
   Datasets*, Chapter 3 "Finding Similar Items". <http://www.mmds.org/>
 
 Vector: `testdata/vectors/minhash_lsh.json`.
+
+### 5.12 Blocked Bloom filter (tag 12)
+
+**Parameters.** `expected_items` n > 0 and `fp_rate` p in (0, 1), or an
+explicit block count B in [1, 2^32] and bits per item k in [1, 16]. Each
+block is 512 bits (8 × u64, one cache line).
+
+**Salts.** Let g be SplitMix64 (§2.3) seeded with 0. For i = 0 … 15,
+`s_i = (g.next() mod 2^32) OR 1`.
+
+**Add / contains.** With `h = H(item)` and `x = h mod 2^32`:
+
+```
+block = ((h >> 32) · B) >> 32            # 64-bit arithmetic, < B
+pos_i = ((x · s_i) mod 2^32) >> 23       # i = 0 … k-1, in [0, 512)
+bit   = block · 512 + pos_i
+```
+
+`add` sets the k bits (they may coincide). `contains` returns true iff
+all k bits are set.
+
+**Sizing** (advisory: the wire body stores B and k, so readers never
+recompute them). The false-positive rate at an average of λ items per
+block (Putze et al.) is
+
+```
+FPR(λ, k) = Σ_{j=1..J} e^-λ λ^j / j! · (1 − (1 − 1/512)^(j·k))^k,
+J = floor(λ + 12·√λ + 20)
+```
+
+For each k = 1 … 16, find the largest λ in [0, 512] with FPR(λ, k) ≤ p by
+64 bisection steps (λ = 512 if FPR(512, k) ≤ p). Keep the k with the
+largest λ, the smallest k on ties. Then `B = max(1, ceil(n / λ))`. Example:
+n = 1,000,000, p = 0.01 gives about 9.9 bits per item.
+
+**Merge.** Requires equal B and k: bitwise OR.
+
+**Body.**
+
+| Field | Type |
+|---|---|
+| k | u32, in [1, 16] |
+| bits | bit array (§3.1), `len` = 512 · B |
+
+**References.**
+- Felix Putze, Peter Sanders, Johannes Singler, "Cache-, Hash- and
+  Space-Efficient Bloom Filters", WEA 2007, LNCS 4525, pp. 108–121.
+  <https://doi.org/10.1007/978-3-540-72845-0_9> Journal version: ACM
+  JEA 14, 2009. <https://doi.org/10.1145/1498698.1594230>
+- Martin Dietzfelbinger, Torben Hagerup, Jyrki Katajainen, Martti
+  Penttonen, "A Reliable Randomized Algorithm for the Closest-Pair
+  Problem", Journal of Algorithms 25(1):19–51, 1997 (multiply-shift).
+  <https://doi.org/10.1006/jagm.1997.0873>
+- Daniel Lemire, "Fast Random Integer Generation in an Interval", ACM
+  TOMACS 29(1), 2019 (range reduction). <https://doi.org/10.1145/3230636>
+
+Vector: `testdata/vectors/blocked_bloom_filter.json`.

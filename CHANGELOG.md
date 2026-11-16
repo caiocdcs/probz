@@ -12,6 +12,14 @@
 - `merge` compares eight registers per u64 word: about 6× faster.
 - `memoryBytes()` includes the 256-byte histogram.
 
+### Blocked Bloom filter (new)
+- `BlockedBloomFilter` (Putze, Sanders & Singler 2007): all k bits of an
+  item fall in one 512-bit, cache-line-aligned block, and lookups test them
+  without branching. On an M4 with 16-byte keys at 1%: 5 ns for add, hit
+  and miss at 1M items (classic: 7 / 8 / 21 ns) and 17 ns at 50M (classic:
+  30–36 ns), for 9.9 instead of 9.6 bits per item. Wire tag 12, SPEC.md
+  §5.12.
+
 ### Count-Min sketch
 - New `.update = .conservative` option (Estan & Varghese 2002, §3.3.2):
   each counter is raised only to max(counter, estimate + c). It never

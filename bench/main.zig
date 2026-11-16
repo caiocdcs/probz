@@ -51,6 +51,16 @@ pub fn main(init: std.process.Init) !void {
         report("BloomFilter (p=1%)", a, t.nsPerOp(n), bf.memoryBytes());
     }
     {
+        var bf = try probz.BlockedBloomFilter.init(gpa, .{ .expected_items = n, .fp_rate = 0.01 });
+        defer bf.deinit(gpa);
+        var t = Timer.begin();
+        for (keys) |k| bf.addHash(k);
+        const a = t.nsPerOp(n);
+        t = Timer.begin();
+        for (keys) |k| sink += @intFromBool(bf.containsHash(k));
+        report("BlockedBloomFilter (p=1%)", a, t.nsPerOp(n), bf.memoryBytes());
+    }
+    {
         var cbf = try probz.DefaultCountingBloomFilter.init(gpa, .{ .expected_items = n, .fp_rate = 0.01 });
         defer cbf.deinit(gpa);
         var t = Timer.begin();
@@ -230,7 +240,7 @@ fn comparable(gpa: std.mem.Allocator, sink: *u64) !void {
 
     // Bloom, p = 1%.
     for ([_]usize{ 10_000, 1_000_000, 50_000_000 }) |size| {
-        inline for (.{probz.BloomFilter}) |F| {
+        inline for (.{ probz.BloomFilter, probz.BlockedBloomFilter }) |F| {
             const label = if (F == probz.BloomFilter) "Bloom" else "BlockedBloom";
             var f = try F.init(gpa, .{ .expected_items = size, .fp_rate = 0.01 });
             defer f.deinit(gpa);

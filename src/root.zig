@@ -7,6 +7,7 @@
 
 // Membership filters
 pub const BloomFilter = bloom_filter.BloomFilter;
+pub const BlockedBloomFilter = blocked_bloom_filter.BlockedBloomFilter;
 pub const CountingBloomFilter = counting_bloom_filter.CountingBloomFilter;
 pub const DefaultCountingBloomFilter = counting_bloom_filter.DefaultCountingBloomFilter;
 pub const ScalableBloomFilter = scalable_bloom_filter.ScalableBloomFilter;
@@ -39,6 +40,7 @@ pub const hash = @import("hash.zig");
 pub const serde = @import("serde.zig");
 
 const bloom_filter = @import("filters/bloom_filter.zig");
+const blocked_bloom_filter = @import("filters/blocked_bloom_filter.zig");
 const counting_bloom_filter = @import("filters/counting_bloom_filter.zig");
 const scalable_bloom_filter = @import("filters/scalable_bloom_filter.zig");
 const cuckoo_filter = @import("filters/cuckoo_filter.zig");

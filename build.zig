@@ -2,6 +2,7 @@ const std = @import("std");
 
 const examples = [_][]const u8{
     "bloom_filter",
+    "blocked_bloom_filter",
     "counting_bloom_filter",
     "scalable_bloom_filter",
     "quotient_filter",

@@ -12,6 +12,7 @@ Requires Zig 0.17.1 or newer.
 | Structure | Answers | Add | Remove | Merge | Paper |
 |---|---|:-:|:-:|:-:|---|
 | `BloomFilter` | membership | ✓ | | ✓ | [Bloom 1970](https://doi.org/10.1145/362686.362692) |
+| `BlockedBloomFilter` | membership, cache-friendly | ✓ | | ✓ | [Putze et al. 2007](https://doi.org/10.1007/978-3-540-72845-0_9) |
 | `CountingBloomFilter(Counter)` | membership, multiplicity | ✓ | ✓ | ✓ | [Fan et al. 2000](https://doi.org/10.1109/90.851975) |
 | `ScalableBloomFilter` | membership, growing sets | ✓ | | | [Almeida et al. 2007](https://doi.org/10.1016/j.ipl.2006.10.007) |
 | `CuckooFilter(Fingerprint, b)` | membership | ✓ | ✓ | | [Fan et al. 2014](https://doi.org/10.1145/2674005.2674994) |
@@ -32,7 +33,9 @@ follows, and notes any deliberate deviation.
 ### Choosing a structure
 
 - **Is x in the set?** Use `BloomFilter` when you know the size up front, or
-  `ScalableBloomFilter` when you don't. If you need deletes, use
+  `ScalableBloomFilter` when you don't. `BlockedBloomFilter` reads one
+  cache line per operation: use it when the filter outgrows the CPU cache
+  or most lookups miss (about 3% more memory at 1%). If you need deletes, use
   `CuckooFilter` (most compact at low false-positive rates) or
   `QuotientFilter` (supports merge and ordered iteration).
   `CountingBloomFilter` also tracks multiplicity.
