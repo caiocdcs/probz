@@ -118,23 +118,42 @@ zig build gen-vectors                        # regenerate testdata/vectors after
 
 ## Benchmarks
 
-Output of `zig build bench`: 1M pre-hashed keys, single-threaded, on one
-machine, so treat the numbers as indicative only.
+Output of `zig build bench` on an Apple M4: 1M pre-hashed keys,
+single-threaded, on one machine, so treat the numbers as indicative only.
 
 | Structure | add | query | memory |
 |---|--:|--:|--:|
-| BloomFilter (p = 1%) | 15 ns | 8 ns | 1.2 MB |
-| CountingBloomFilter (u4) | 17 ns | 7 ns | 4.8 MB |
-| ScalableBloomFilter (n₀ = 10k) | 83 ns | 21 ns | 2.5 MB |
+| BloomFilter (p = 1%) | 5 ns | 3 ns | 1.2 MB |
+| BlockedBloomFilter (p = 1%) | 2.5 ns | 2.4 ns | 1.24 MB |
+| CountingBloomFilter (u4) | 8 ns | 5 ns | 4.8 MB |
+| ScalableBloomFilter (n₀ = 10k) | 74 ns | 20 ns | 2.5 MB |
 | CuckooFilter (u16, b = 4) | 15 ns | 7 ns | 2.1 MB |
 | QuotientFilter (r = 8, 2²¹ slots) | 7 ns | 6 ns | 2.9 MB |
-| HyperLogLog (p = 14) | 0.6 ns | 10 µs | 16 KB |
-| CountMinSketch (ε = 0.001, δ = 0.01) | 4 ns | 3 ns | 54 KB |
-| SpaceSaving (m = 1000) | 20 ns | 11 ns | 47 KB |
-| TDigest (δ = 100) | 42 ns | 18 ns | 1 KB |
-| QDigest (σ = 2³², k = 256) | 118 ns | 29 µs | 24 KB |
+| HyperLogLog (p = 14) | 0.8 ns | 32 ns | 16 KB |
+| CountMinSketch (ε = 0.001, δ = 0.01) | 3 ns | 3 ns | 54 KB |
+| SpaceSaving (m = 1000) | 16 ns | 9 ns | 47 KB |
+| TDigest (δ = 100) | 40 ns | 5 ns | 12 KB |
+| QDigest (σ = 2³², k = 256) | 96 ns | 28 µs | 24 KB |
 
 `CountingBloomFilter` packs its counters: 16 `u4` counters per 64-bit word.
+
+The second part of the output uses the setup of
+[nalgeon/unsure](https://github.com/nalgeon/unsure)'s Go benchmarks
+(16-byte keys, hashing included), so the two can be compared on one machine.
+Both on the same M4, in ns/op:
+
+| | probz | unsure |
+|---|--:|--:|
+| Bloom 1%, 1M: add / hit / miss (blocked) | 5.0 / 5.0 / 5.0 | 6.1 / 5.8 / 5.6 |
+| Bloom 1%, 50M: add / hit / miss (blocked) | 16.5 / 17.2 / 17.1 | 26.7 / 25.6 / 26.8 |
+| Bloom 1%, 1M: add / hit / miss (classic) | 7.4 / 7.8 / 20.7 | |
+| Count-Min ε = 1e-3: add / count | 6.3 / 5.6 | 10.3 / 5.6 |
+| Count-Min ε = 1e-6: add / count | 22.3 / 19.6 | 51.3 / 36.2 |
+| HyperLogLog p = 14: add / count / merge | 1.4 / 29 / 667 | 3.7 / 33 / 1280 |
+| t-digest δ = 100: add / quantile / merge | 40 / 6.5 / 765 | 38 / 8.4 / 363 |
+
+unsure's Count-Min always uses conservative update. probz's conservative
+mode costs 0.6–4.6 ns more per add.
 
 ## Other languages
 
