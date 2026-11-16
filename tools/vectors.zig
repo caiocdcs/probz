@@ -278,13 +278,23 @@ fn genCountMin(arena: Allocator) anyerror![]const u8 {
         r.* = .{ .input = item, .columns = .{ g.below(16), g.below(16), g.below(16) } };
     }
 
+    // Same stream with conservative update.
+    var cu = try probz.CountMinSketch(u16).init(arena, .{ .width = 16, .depth = 3, .update = .conservative });
+    for (items[0..30], 0..) |item, i| try cu.add(item, @intCast(i + 1));
+    const cu_counts = try arena.alloc(u64, items.len);
+    for (items, cu_counts) |item, *c| c.* = cu.count(item);
+
     return toJson(arena, .{
-        .description = "Count-Min sketch, u16 counters (SPEC.md §5.7): width=16, depth=3; add item-i with amount i+1 for i < 30; count(item-0..item-39)",
+        .description = "Count-Min sketch, u16 counters (SPEC.md §5.7): width=16, depth=3; add item-i with amount i+1 for i < 30; count(item-0..item-39). `conservative` repeats the stream with conservative update.",
         .params = .{ .width = 16, .depth = 3, .counter_bits = 16 },
         .row_columns = rows,
         .total = cms.total,
         .counts = counts,
         .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cms)),
+        .conservative = .{
+            .counts = cu_counts,
+            .serialized = try hexBytes(arena, try probz.serde.toOwnedBytes(arena, cu)),
+        },
     });
 }
 

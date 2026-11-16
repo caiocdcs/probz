@@ -543,29 +543,36 @@ Vector: `testdata/vectors/hyperloglog.json`.
 
 ### 5.7 Count-Min sketch (tag 7)
 
-**Parameters.** Width w > 0, depth d > 0, and a counter width (8–64 bits,
-default 32). From error bounds: `w = ceil(e / ε)` and
+**Parameters.** Width w > 0, depth d > 0, a counter width (8–64 bits,
+default 32), and an update rule: standard (default) or conservative. From error bounds: `w = ceil(e / ε)` and
 `d = max(1, ceil(ln(1 / δ)))`, for 0 < ε, δ < 1.
 
 **Row indexes.** With `h = H(item)`, let g be SplitMix64 (§2.3) seeded
 with h. The column for row j (j = 0 … d−1) is the j-th output
 `g.below(w)`. The counter is `C[j · w + column]`.
 
-**Add(item, c).** If any of the d counters, or the total N, would exceed
-its maximum, fail without changing anything. Otherwise add c to each of
-the d counters and to N.
+**Add(item, c), standard.** If any of the d counters, or the total N,
+would exceed its maximum, fail without changing anything. Otherwise add c
+to each of the d counters and to N.
+
+**Add(item, c), conservative** (Estan & Varghese §3.3.2). Let â be the
+current Count(item) and v = â + c. If v or N + c would exceed its
+maximum, fail without changing anything. Otherwise set each of the d
+counters to max(counter, v) and add c to N.
 
 **Count.** The minimum of the d counters. It is never below the true
 count, and with probability ≥ 1 − δ it is at most the true count + ε·N.
 
 **Merge.** Requires equal w, d, and counter width: element-wise addition
-plus the totals, failing without changes on overflow.
+plus the totals, failing without changes on overflow. The receiver keeps
+its update rule. For conservative sketches the sum is still an upper
+bound, but not the sketch of the combined stream.
 
 **Body.**
 
 | Field | Type |
 |---|---|
-| counter bits | u8 |
+| flags | u8: counter bits in bits 0–6, bit 7 set for conservative update |
 | d | u32 |
 | w | u64 |
 | N | u64 |
@@ -582,6 +589,9 @@ every row depends only on the 64-bit item hash.
 - Parameters and guarantee as restated in Kirsch & Mitzenmacher, Random
   Structures & Algorithms 33(2), 2008, §9.1.
   <https://doi.org/10.1002/rsa.20208>
+- Cristian Estan, George Varghese, "New Directions in Traffic Measurement
+  and Accounting", SIGCOMM 2002, pp. 323–336, §3.3.2 (conservative
+  update). <https://doi.org/10.1145/633025.633056>
 
 Vector: `testdata/vectors/count_min_sketch.json`.
 

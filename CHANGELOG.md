@@ -12,6 +12,13 @@
 - `merge` compares eight registers per u64 word: about 6× faster.
 - `memoryBytes()` includes the 256-byte histogram.
 
+### Count-Min sketch
+- New `.update = .conservative` option (Estan & Varghese 2002, §3.3.2):
+  each counter is raised only to max(counter, estimate + c). It never
+  undercounts, overestimates less, and costs ~1–5 ns more per add. The mode
+  is stored in bit 7 of the counter-bits byte (tag 7), so existing
+  serialized sketches still read as standard update.
+
 ## 0.1.0 (2026-11-15)
 
 First versioned release. Every structure was reviewed against its paper.

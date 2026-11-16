@@ -13,6 +13,16 @@
 //! substitute that keeps every row hash a function of H(item), so callers
 //! can pass precomputed hashes.
 //!
+//! Conservative update (`.update = .conservative`, Estan & Varghese §3.3.2)
+//! raises each of the item's counters only as far as needed: with current
+//! estimate â, every counter becomes max(counter, â + c). Each counter still
+//! bounds every item that maps to it, so estimates never undercount, the
+//! ε·N guarantee still holds, and overestimates shrink (about 2× on the
+//! streams in the tests). Unlike standard update it cannot represent
+//! deletions, and the sketch is no longer a linear function of the stream:
+//! merging two conservative sketches by addition is still a valid upper
+//! bound but is not the sketch of the combined stream.
+//!
 //! # References
 //!
 //! - Graham Cormode, S. Muthukrishnan, "An Improved Data Stream Summary:
@@ -21,6 +31,9 @@
 //! - The parameters and guarantee above are as restated in Kirsch &
 //!   Mitzenmacher, Random Structures & Algorithms 33(2), 2008, §9.1
 //!   "Count-Min Sketch Review". https://doi.org/10.1002/rsa.20208
+//! - Cristian Estan, George Varghese, "New Directions in Traffic
+//!   Measurement and Accounting", SIGCOMM 2002, §3.3.2 (conservative
+//!   update). https://doi.org/10.1145/633025.633056
 
 const std = @import("std");
 const math = std.math;
@@ -48,12 +61,21 @@ pub fn CountMinSketch(comptime Counter: type) type {
         counters: []Counter,
         /// N: the sum of all added amounts.
         total: u64,
+        update: Update,
+
+        pub const Update = enum(u1) {
+            /// Add c to each of the item's d counters (Cormode & Muthukrishnan).
+            standard = 0,
+            /// Raise each counter to at least â + c (Estan & Varghese).
+            conservative = 1,
+        };
 
         pub const Options = struct {
             /// Counters per row (w > 0).
             width: u64,
             /// Number of rows (d > 0).
             depth: u32,
+            update: Update = .standard,
         };
 
         pub const InitError = error{InvalidParameters} || Allocator.Error;
@@ -65,7 +87,7 @@ pub fn CountMinSketch(comptime Counter: type) type {
             const n = math.mul(u64, options.width, options.depth) catch return error.OutOfMemory;
             const counters = try allocator.alloc(Counter, math.cast(usize, n) orelse return error.OutOfMemory);
             @memset(counters, 0);
-            return .{ .width = options.width, .depth = options.depth, .counters = counters, .total = 0 };
+            return .{ .width = options.width, .depth = options.depth, .counters = counters, .total = 0, .update = options.update };
         }
 
         /// Size for additive error ε·N with probability 1 − δ:
@@ -96,12 +118,23 @@ pub fn CountMinSketch(comptime Counter: type) type {
         pub fn addHash(self: *Self, h: u64, amount: Counter) AddError!void {
             if (amount == 0) return;
             const new_total = math.add(u64, self.total, amount) catch return error.Overflow;
-            var rows = RowIterator.init(self, h);
-            while (rows.next()) |i| {
-                if (math.maxInt(Counter) - self.counters[i] < amount) return error.Overflow;
+            switch (self.update) {
+                .standard => {
+                    var rows = RowIterator.init(self, h);
+                    while (rows.next()) |i| {
+                        if (math.maxInt(Counter) - self.counters[i] < amount) return error.Overflow;
+                    }
+                    rows = RowIterator.init(self, h);
+                    while (rows.next()) |i| self.counters[i] += amount;
+                },
+                .conservative => {
+                    const est: Counter = @intCast(self.countHash(h));
+                    if (math.maxInt(Counter) - est < amount) return error.Overflow;
+                    const v = est + amount;
+                    var rows = RowIterator.init(self, h);
+                    while (rows.next()) |i| self.counters[i] = @max(self.counters[i], v);
+                },
             }
-            rows = RowIterator.init(self, h);
-            while (rows.next()) |i| self.counters[i] += amount;
             self.total = new_total;
         }
 
@@ -123,7 +156,9 @@ pub fn CountMinSketch(comptime Counter: type) type {
         }
 
         /// Sum of two sketches of the same dimensions (the sketch of the
-        /// combined stream). Fails without changes on overflow.
+        /// combined stream). Fails without changes on overflow. With
+        /// conservative update the sum is still an upper bound for every
+        /// item, but looser than updating one sketch with both streams.
         pub fn merge(self: *Self, other: Self) MergeError!void {
             if (self.width != other.width or self.depth != other.depth) return error.IncompatibleSketches;
             const new_total = math.add(u64, self.total, other.total) catch return error.Overflow;
@@ -163,11 +198,12 @@ pub fn CountMinSketch(comptime Counter: type) type {
             }
         };
 
-        /// Body (tag 7): u8 counter bits, u32 d, u64 w, u64 N, then d·w
-        /// counters row-major, each little-endian in ceil(bits / 8) bytes.
+        /// Body (tag 7): u8 flags (counter bits in bits 0–6, conservative
+        /// update in bit 7), u32 d, u64 w, u64 N, then d·w counters
+        /// row-major, each little-endian in ceil(bits / 8) bytes.
         pub fn serialize(self: Self, w: *std.Io.Writer) serde.WriteError!void {
             try serde.writeHeader(w, .count_min_sketch);
-            try w.writeByte(info.int.bits);
+            try w.writeByte(@as(u8, info.int.bits) | @as(u8, @backingInt(self.update)) << 7);
             try serde.writeInt(w, u32, self.depth);
             try serde.writeInt(w, u64, self.width);
             try serde.writeInt(w, u64, self.total);
@@ -176,10 +212,12 @@ pub fn CountMinSketch(comptime Counter: type) type {
 
         pub fn deserialize(allocator: Allocator, r: *std.Io.Reader) serde.ReadError!Self {
             try serde.readHeader(r, .count_min_sketch);
-            if (try r.takeByte() != info.int.bits) return error.InvalidData;
+            const flags = try r.takeByte();
+            if (flags & 0x7f != info.int.bits) return error.InvalidData;
+            const update: Update = @fromBackingInt(@intCast(flags >> 7));
             const depth = try serde.readInt(r, u32);
             const width = try serde.readInt(r, u64);
-            var self = init(allocator, .{ .width = width, .depth = depth }) catch |err| return serde.fromInitError(err);
+            var self = init(allocator, .{ .width = width, .depth = depth, .update = update }) catch |err| return serde.fromInitError(err);
             errdefer self.deinit(allocator);
             self.total = try serde.readInt(r, u64);
             for (self.counters) |*c| c.* = math.cast(Counter, try serde.readInt(r, Wire)) orelse return error.InvalidData;
@@ -243,6 +281,58 @@ test "error bound holds with probability 1 - delta" {
         if (@as(f64, @floatFromInt(est - truth)) > bound) violations += 1;
     }
     try testing.expect(@as(f64, @floatFromInt(violations)) / distinct <= delta);
+}
+
+test "conservative update: never undercounts, overcounts less" {
+    // Zipf-like stream over 20k items into a deliberately small sketch.
+    var std_s = try DefaultCountMinSketch.init(testing.allocator, .{ .width = 1024, .depth = 4 });
+    defer std_s.deinit(testing.allocator);
+    var cu = try DefaultCountMinSketch.init(testing.allocator, .{ .width = 1024, .depth = 4, .update = .conservative });
+    defer cu.deinit(testing.allocator);
+
+    const distinct = 20_000;
+    var rng = hashing.SplitMix64.init(42);
+    const truth = try testing.allocator.alloc(u64, distinct);
+    defer testing.allocator.free(truth);
+    @memset(truth, 0);
+    for (0..200_000) |_| {
+        // P(i) ~ 1/(i+1): pick i = floor(distinct^u) - 1.
+        const u = @as(f64, @floatFromInt(rng.next() >> 11)) / 0x1p53;
+        const i: usize = @min(distinct - 1, @as(usize, @intFromFloat(@floor(math.pow(f64, distinct, u)))) - 1);
+        truth[i] += 1;
+        const h = hashing.hashKey(@as(u64, i));
+        try std_s.addHash(h, 1);
+        try cu.addHash(h, 1);
+    }
+    try testing.expectEqual(std_s.total, cu.total);
+    var err_std: u64 = 0;
+    var err_cu: u64 = 0;
+    for (truth, 0..) |t, i| {
+        const h = hashing.hashKey(@as(u64, i));
+        const a = std_s.countHash(h);
+        const b = cu.countHash(h);
+        try testing.expect(b >= t and b <= a);
+        err_std += a - t;
+        err_cu += b - t;
+    }
+    try testing.expect(err_cu * 3 < err_std * 2); // at least 1.5x lower
+}
+
+test "conservative update: overflow and serialization" {
+    var cms = try CountMinSketch(u8).init(testing.allocator, .{ .width = 64, .depth = 3, .update = .conservative });
+    defer cms.deinit(testing.allocator);
+    try cms.add("x", 200);
+    try testing.expectError(error.Overflow, cms.add("x", 56));
+    try cms.add("x", 55);
+    try testing.expectEqual(@as(u64, 255), cms.count("x"));
+
+    const bytes = try serde.toOwnedBytes(testing.allocator, cms);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqual(@as(u8, 0x88), bytes[6]); // 8 bits | conservative
+    var r: std.Io.Reader = .fixed(bytes);
+    var back = try CountMinSketch(u8).deserialize(testing.allocator, &r);
+    defer back.deinit(testing.allocator);
+    try testing.expect(back.update == .conservative);
 }
 
 test "merge equals the combined stream" {

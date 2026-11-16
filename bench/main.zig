@@ -265,10 +265,11 @@ fn comparable(gpa: std.mem.Allocator, sink: *u64) !void {
 
     // Count-Min, δ = 0.01.
     for ([_]f64{ 1e-3, 1e-5, 1e-6 }) |eps| {
-        inline for (.{false}) |conservative| {
+        inline for (.{ false, true }) |conservative| {
             const label = if (conservative) "CountMin(cu)" else "CountMin";
             var s = try probz.DefaultCountMinSketch.initWithError(gpa, eps, 0.01);
             defer s.deinit(gpa);
+            s.update = if (conservative) .conservative else .standard;
             for (keys3) |*k| try s.add(k, 1);
             var t = Timer.begin();
             for (keys1) |*k| try s.add(k, 1);
