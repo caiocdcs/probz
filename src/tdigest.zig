@@ -263,6 +263,11 @@ pub const TDigest = struct {
         return self.total;
     }
 
+    /// Bytes allocated for centroids and the buffer (fixed after init).
+    pub fn memoryBytes(self: TDigest) usize {
+        return (self.centroids.capacity + self.buffer.capacity) * @sizeOf(Centroid);
+    }
+
     pub fn clear(self: *TDigest) void {
         self.centroids.clearRetainingCapacity();
         self.buffer.clearRetainingCapacity();

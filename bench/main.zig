@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
         const a = t.nsPerOp(n);
         t = Timer.begin();
         for (0..100_000) |i| sink +%= @intFromFloat(try td.quantile(@as(f64, @floatFromInt(i)) / 100_000));
-        report("TDigest (delta=100)", a, t.nsPerOp(100_000), td.centroids.items.len * @sizeOf(probz.TDigest.Centroid));
+        report("TDigest (delta=100)", a, t.nsPerOp(100_000), td.memoryBytes());
     }
     {
         var qd = try probz.QDigest.init(gpa, .{ .log_universe = 32, .k = 256 });
@@ -177,5 +177,162 @@ pub fn main(init: std.process.Init) !void {
         report("MinHashLSH (128 h, 20 tok)", a, t.nsPerOp(1000), lsh.len() * lsh.numHashes() * @sizeOf(u64));
     }
 
+    try comparable(gpa, &sink);
+
     std.debug.print("\n(checksum {d})\n", .{sink});
+}
+
+// Section 2: the same setup as github.com/nalgeon/unsure's bench/ package,
+// so numbers can be compared side by side on one machine. Keys are 16 bytes
+// (u64 seed, u64 index, little-endian) and every operation hashes its key.
+// A loop cycles through 1M distinct keys. Structures are pre-filled so the
+// timed loop measures the steady state.
+
+const cycle = 1_000_000;
+
+fn makeKeys(gpa: std.mem.Allocator, seed: u64, count: usize) ![][16]u8 {
+    const ks = try gpa.alloc([16]u8, count);
+    for (ks, 0..) |*k, i| {
+        std.mem.writeInt(u64, k[0..8], seed, .little);
+        std.mem.writeInt(u64, k[8..16], i, .little);
+    }
+    return ks;
+}
+
+fn row(comptime fmt: []const u8, args: anytype, ns: f64) void {
+    var buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&buf, fmt, args) catch "?";
+    std.debug.print("  {s:<40} {d:>10.1} ns/op\n", .{ name, ns });
+}
+
+/// Normally distributed values (Box–Muller over SplitMix64), as in
+/// unsure's t-digest benchmarks.
+fn normals(gpa: std.mem.Allocator, seed: u64, count: usize) ![]f64 {
+    var rng = probz.hash.SplitMix64.init(seed);
+    const xs = try gpa.alloc(f64, count);
+    for (xs) |*x| {
+        const u1_: f64 = (@as(f64, @floatFromInt(rng.next() >> 11)) + 1) / 0x1p53;
+        const u2_: f64 = @as(f64, @floatFromInt(rng.next() >> 11)) / 0x1p53;
+        x.* = @sqrt(-2 * @log(u1_)) * @cos(2 * std.math.pi * u2_);
+    }
+    return xs;
+}
+
+fn comparable(gpa: std.mem.Allocator, sink: *u64) !void {
+    std.debug.print("\nComparable to nalgeon/unsure (16-byte keys, hashing included)\n\n", .{});
+
+    const keys1 = try makeKeys(gpa, 1, cycle);
+    defer gpa.free(keys1);
+    const keys2 = try makeKeys(gpa, 2, cycle);
+    defer gpa.free(keys2);
+    const keys3 = try makeKeys(gpa, 3, cycle);
+    defer gpa.free(keys3);
+
+    // Bloom, p = 1%.
+    for ([_]usize{ 10_000, 1_000_000, 50_000_000 }) |size| {
+        inline for (.{probz.BloomFilter}) |F| {
+            const label = if (F == probz.BloomFilter) "Bloom" else "BlockedBloom";
+            var f = try F.init(gpa, .{ .expected_items = size, .fp_rate = 0.01 });
+            defer f.deinit(gpa);
+            var key: [16]u8 = undefined;
+            std.mem.writeInt(u64, key[0..8], 1, .little);
+            for (0..size) |i| {
+                std.mem.writeInt(u64, key[8..16], i, .little);
+                f.add(&key);
+            }
+            const live = keys1[0..@min(size, cycle)];
+            const ops = cycle;
+            var t = Timer.begin();
+            for (0..ops) |i| sink.* += @intFromBool(f.contains(&live[i % live.len]));
+            row("{s} hit n={d}", .{ label, size }, t.nsPerOp(ops));
+            t = Timer.begin();
+            for (0..ops) |i| sink.* += @intFromBool(f.contains(&keys2[i % live.len]));
+            row("{s} miss n={d}", .{ label, size }, t.nsPerOp(ops));
+            var fp: usize = 0;
+            for (keys2) |*k| fp += @intFromBool(f.contains(k));
+            std.debug.print("  {s} n={d}: {d:.2} bits/item, measured FPR {d:.3}%\n", .{
+                label,
+                size,
+                @as(f64, @floatFromInt(f.memoryBytes() * 8)) / @as(f64, @floatFromInt(size)),
+                @as(f64, @floatFromInt(fp)) * 100 / cycle,
+            });
+            // Add last: it overfills the filter. Its cost doesn't depend on load.
+            t = Timer.begin();
+            for (0..ops) |i| f.add(&keys3[i % cycle]);
+            row("{s} add n={d}", .{ label, size }, t.nsPerOp(ops));
+        }
+    }
+
+    // Count-Min, δ = 0.01.
+    for ([_]f64{ 1e-3, 1e-5, 1e-6 }) |eps| {
+        inline for (.{false}) |conservative| {
+            const label = if (conservative) "CountMin(cu)" else "CountMin";
+            var s = try probz.DefaultCountMinSketch.initWithError(gpa, eps, 0.01);
+            defer s.deinit(gpa);
+            for (keys3) |*k| try s.add(k, 1);
+            var t = Timer.begin();
+            for (keys1) |*k| try s.add(k, 1);
+            row("{s} add eps={e}", .{ label, eps }, t.nsPerOp(cycle));
+            t = Timer.begin();
+            for (keys1) |*k| sink.* +%= s.count(k);
+            row("{s} count eps={e}", .{ label, eps }, t.nsPerOp(cycle));
+        }
+    }
+
+    // HyperLogLog.
+    for ([_]u5{ 10, 14, 18 }) |p| {
+        var s = try probz.HyperLogLog.init(gpa, .{ .precision = p });
+        defer s.deinit(gpa);
+        for (keys3) |*k| s.add(k);
+        var t = Timer.begin();
+        for (keys1) |*k| s.add(k);
+        row("HLL add p={d}", .{p}, t.nsPerOp(cycle));
+        const reps = 10_000;
+        t = Timer.begin();
+        for (0..reps) |_| sink.* +%= @intFromFloat(s.cardinality());
+        row("HLL count p={d}", .{p}, t.nsPerOp(reps));
+
+        var other = try probz.HyperLogLog.init(gpa, .{ .precision = p });
+        defer other.deinit(gpa);
+        for (keys2) |*k| other.add(k);
+        try s.merge(other);
+        t = Timer.begin();
+        for (0..1000) |_| try s.merge(other);
+        row("HLL merge(same) p={d}", .{p}, t.nsPerOp(1000));
+    }
+
+    // t-digest over normal values.
+    const xs1 = try normals(gpa, 1, cycle);
+    defer gpa.free(xs1);
+    const xs2 = try normals(gpa, 2, cycle);
+    defer gpa.free(xs2);
+    for ([_]f64{ 50, 100, 500 }) |delta| {
+        var d = try probz.TDigest.init(gpa, .{ .compression = delta });
+        defer d.deinit(gpa);
+        for (xs2) |x| try d.add(x);
+        var t = Timer.begin();
+        for (xs1) |x| try d.add(x);
+        row("TDigest add delta={d}", .{delta}, t.nsPerOp(cycle));
+        d.flush();
+        const qs = [_]f64{ 0.5, 0.9, 0.99, 0.999, 0.1, 0.01 };
+        const reps = 1_000_000;
+        t = Timer.begin();
+        for (0..reps) |i| sink.* +%= @bitCast(try d.quantile(qs[i % qs.len]));
+        row("TDigest quantile delta={d}", .{delta}, t.nsPerOp(reps));
+
+        var others: [8]probz.TDigest = undefined;
+        for (&others, 0..) |*o, i| {
+            o.* = try probz.TDigest.init(gpa, .{ .compression = delta });
+            const vs = try normals(gpa, i + 2, cycle / 10);
+            defer gpa.free(vs);
+            for (vs) |x| try o.add(x);
+            o.flush();
+        }
+        defer for (&others) |*o| o.deinit(gpa);
+        const merges = 10_000;
+        t = Timer.begin();
+        for (0..merges) |i| try d.merge(others[i % others.len]);
+        row("TDigest merge delta={d}", .{delta}, t.nsPerOp(merges));
+        std.debug.print("  TDigest delta={d}: {d} bytes\n", .{ delta, d.memoryBytes() });
+    }
 }
