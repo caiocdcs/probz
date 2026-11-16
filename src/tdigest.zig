@@ -39,6 +39,9 @@ pub const TDigest = struct {
     centroids: std.ArrayList(Centroid),
     /// Unmerged points. Also used as scratch space during a merge.
     buffer: std.ArrayList(Centroid),
+    /// centers[i] = Σ_{j<i} w_j + w_i / 2, the quantile knot of centroid i.
+    /// Valid for every centroid whenever the buffer is empty.
+    centers: []f64,
     buffer_limit: usize,
     max_centroids: usize,
     /// Total weight N (centroids + buffer).
@@ -74,11 +77,14 @@ pub const TDigest = struct {
 
         var centroids = try std.ArrayList(Centroid).initCapacity(allocator, max_centroids);
         errdefer centroids.deinit(allocator);
-        const buffer = try std.ArrayList(Centroid).initCapacity(allocator, buffer_limit + max_centroids);
+        var buffer = try std.ArrayList(Centroid).initCapacity(allocator, buffer_limit + max_centroids);
+        errdefer buffer.deinit(allocator);
+        const centers = try allocator.alloc(f64, max_centroids);
         return .{
             .compression = delta,
             .centroids = centroids,
             .buffer = buffer,
+            .centers = centers,
             .buffer_limit = buffer_limit,
             .max_centroids = max_centroids,
             .total = 0,
@@ -90,6 +96,7 @@ pub const TDigest = struct {
     pub fn deinit(self: *TDigest, allocator: Allocator) void {
         self.centroids.deinit(allocator);
         self.buffer.deinit(allocator);
+        allocator.free(self.centers);
         self.* = undefined;
     }
 
@@ -111,9 +118,32 @@ pub const TDigest = struct {
     /// Merge buffered points into the centroids (Algorithm 1).
     pub fn flush(self: *TDigest) void {
         if (self.buffer.items.len == 0) return;
-        self.buffer.appendSliceAssumeCapacity(self.centroids.items);
+        // Sort the new points, then merge them with the centroids, which
+        // are normally already sorted (fall back to a full sort if not).
+        const fresh = self.buffer.items.len;
+        const old = self.centroids.items;
+        std.mem.sort(Centroid, self.buffer.items, {}, Centroid.lessThan);
+        if (std.sort.isSorted(Centroid, old, {}, Centroid.lessThan)) {
+            self.buffer.items.len += old.len;
+            const xs_all = self.buffer.items;
+            var i = fresh;
+            var j = old.len;
+            var out = xs_all.len;
+            while (j > 0) {
+                out -= 1;
+                if (i > 0 and Centroid.lessThan({}, old[j - 1], xs_all[i - 1])) {
+                    i -= 1;
+                    xs_all[out] = xs_all[i];
+                } else {
+                    j -= 1;
+                    xs_all[out] = old[j];
+                }
+            }
+        } else {
+            self.buffer.appendSliceAssumeCapacity(old);
+            std.mem.sort(Centroid, self.buffer.items, {}, Centroid.lessThan);
+        }
         const xs = self.buffer.items;
-        std.mem.sort(Centroid, xs, {}, Centroid.lessThan);
 
         const n: f64 = @floatFromInt(self.total);
         self.centroids.clearRetainingCapacity();
@@ -135,6 +165,16 @@ pub const TDigest = struct {
         }
         self.centroids.appendAssumeCapacity(sigma);
         self.buffer.clearRetainingCapacity();
+        self.updateCenters();
+    }
+
+    fn updateCenters(self: *TDigest) void {
+        var cum: f64 = 0;
+        for (self.centroids.items, self.centers[0..self.centroids.items.len]) |c, *center| {
+            const w: f64 = @floatFromInt(c.weight);
+            center.* = cum + w / 2;
+            cum += w;
+        }
     }
 
     /// Weighted mean, computed as m₁ + (m₂ − m₁) · w₂ / (w₁ + w₂).
@@ -165,19 +205,20 @@ pub const TDigest = struct {
         if (t <= 0) return self.min;
         if (t >= n) return self.max;
 
-        // Walk the knots (0, min), (center_i, mean_i), (N, max).
-        var prev_t: f64 = 0;
-        var prev_v: f64 = self.min;
-        var cum: f64 = 0;
-        for (self.centroids.items) |c| {
-            const w: f64 = @floatFromInt(c.weight);
-            const center = cum + w / 2;
-            if (t <= center) return lerp(prev_t, prev_v, center, c.mean, t);
-            prev_t = center;
-            prev_v = c.mean;
-            cum += w;
+        // Knots (0, min), (center_i, mean_i), (N, max): binary search for
+        // the first center ≥ t.
+        const cs = self.centroids.items;
+        const centers = self.centers[0..cs.len];
+        var lo: usize = 0;
+        var hi: usize = centers.len;
+        while (lo < hi) {
+            const mid = (lo + hi) / 2;
+            if (centers[mid] < t) lo = mid + 1 else hi = mid;
         }
-        return lerp(prev_t, prev_v, n, self.max, t);
+        const prev_t = if (lo == 0) 0 else centers[lo - 1];
+        const prev_v = if (lo == 0) self.min else cs[lo - 1].mean;
+        if (lo == cs.len) return lerp(prev_t, prev_v, n, self.max, t);
+        return lerp(prev_t, prev_v, centers[lo], cs[lo].mean, t);
     }
 
     /// Estimated fraction of values ≤ x: the inverse of `quantile`'s
@@ -263,9 +304,11 @@ pub const TDigest = struct {
         return self.total;
     }
 
-    /// Bytes allocated for centroids and the buffer (fixed after init).
+    /// Bytes allocated for centroids, the buffer, and the quantile index
+    /// (fixed after init).
     pub fn memoryBytes(self: TDigest) usize {
-        return (self.centroids.capacity + self.buffer.capacity) * @sizeOf(Centroid);
+        return (self.centroids.capacity + self.buffer.capacity) * @sizeOf(Centroid) +
+            self.centers.len * @sizeOf(f64);
     }
 
     pub fn clear(self: *TDigest) void {
@@ -314,11 +357,53 @@ pub const TDigest = struct {
         }
         if (sum != self.total) return error.InvalidData;
         if (!std.sort.isSorted(Centroid, self.centroids.items, {}, Centroid.lessThan)) return error.InvalidData;
+        self.updateCenters();
         return self;
     }
 };
 
 const testing = std.testing;
+
+test "quantile index matches a linear scan; sorted merge matches a full sort" {
+    var td = try TDigest.init(testing.allocator, .{ .compression = 50 });
+    defer td.deinit(testing.allocator);
+    var rng = @import("hash.zig").SplitMix64.init(7);
+    // Duplicates and repeated flushes exercise ties in the merge.
+    for (0..20_000) |_| try td.add(@floatFromInt(rng.below(300)));
+    td.flush();
+
+    // Reference: the full sort of the same multiset gives the same flush.
+    var ref = try TDigest.init(testing.allocator, .{ .compression = 50 });
+    defer ref.deinit(testing.allocator);
+    ref.total = td.total;
+    ref.min = td.min;
+    ref.max = td.max;
+    ref.buffer.appendSliceAssumeCapacity(td.centroids.items);
+    std.mem.sort(TDigest.Centroid, ref.buffer.items, {}, TDigest.Centroid.lessThan);
+    ref.flush();
+    try testing.expectEqualSlices(TDigest.Centroid, td.centroids.items, ref.centroids.items);
+
+    const n: f64 = @floatFromInt(td.total);
+    for (0..1001) |i| {
+        const q = @as(f64, @floatFromInt(i)) / 1000;
+        const t = q * n;
+        var want: f64 = undefined;
+        if (t <= 0) want = td.min else if (t >= n) want = td.max else {
+            var prev_t: f64 = 0;
+            var prev_v = td.min;
+            var cum: f64 = 0;
+            want = blk: for (td.centroids.items) |c| {
+                const w: f64 = @floatFromInt(c.weight);
+                const center = cum + w / 2;
+                if (t <= center) break :blk TDigest.lerp(prev_t, prev_v, center, c.mean, t);
+                prev_t = center;
+                prev_v = c.mean;
+                cum += w;
+            } else TDigest.lerp(prev_t, prev_v, n, td.max, t);
+        }
+        try testing.expectEqual(want, try td.quantile(q));
+    }
+}
 
 test "init validates compression" {
     try testing.expectError(error.InvalidParameters, TDigest.init(testing.allocator, .{ .compression = 5 }));

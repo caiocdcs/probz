@@ -20,6 +20,13 @@
   30–36 ns), for 9.9 instead of 9.6 bits per item. Wire tag 12, SPEC.md
   §5.12.
 
+### t-digest
+- `quantile` binary-searches a cached index of centroid centers, rebuilt on
+  flush: 15 → 6.5 ns at δ = 100, 124 → 7.8 ns at δ = 500. Flush sorts only
+  the new points and merges them with the already-sorted centroids (add:
+  47 → 40 ns). Results are bit-identical; the index adds 8·(δ + 2) bytes.
+- `memoryBytes()` (new) reports the preallocated size.
+
 ### Count-Min sketch
 - New `.update = .conservative` option (Estan & Varghese 2002, §3.3.2):
   each counter is raised only to max(counter, estimate + c). It never
